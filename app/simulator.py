@@ -11,13 +11,18 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
 from app.models import FailureEvent, Mandate, Rail
 
 ALL_RAILS = frozenset({Rail.upi_autopay, Rail.e_nach, Rail.card_emandate})
+
+
+def utcnow() -> datetime:
+    """Naive-UTC now, matching the naive DateTime columns in app.models."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 @dataclass(frozen=True)
@@ -348,7 +353,7 @@ def inject_failure(
         taxonomy_id=category.id,
         raw_reason_text=variant.template,
         ground_truth_recoverable=variant.recoverable,
-        occurred_at=occurred_at or datetime.utcnow(),
+        occurred_at=occurred_at or utcnow(),
     )
     db.add(event)
     if commit:
