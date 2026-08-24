@@ -183,6 +183,18 @@
   .badge.outcome-success { background: var(--c-success); color: #04210b; }
   .badge.outcome-failed { background: var(--c-failed); color: #2b0705; }
   .badge.outcome-noop { background: var(--c-noop); color: #111; }
+  .badge.taxonomy { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); }
+  .badge.escalation-type { background: var(--c-escalate); color: #2b1300; }
+  .tooltip-target { cursor: help; border: none; font: inherit; }
+  #badge-tooltip {
+    position: fixed; z-index: 1000; max-width: 280px; display: none;
+    background: var(--panel-2); border: 1px solid var(--accent); border-radius: 8px;
+    padding: 10px 12px; font-size: 12.5px; color: var(--text); line-height: 1.4;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+  }
+  #badge-tooltip .tip-text { margin-bottom: 6px; }
+  #badge-tooltip .tip-link { font-size: 11px; color: var(--accent); text-decoration: none; white-space: nowrap; }
+  #badge-tooltip .tip-link:hover { text-decoration: underline; }
 
   .reasoning {
     margin-top: 8px;
@@ -197,6 +209,7 @@
   .detail-grid { margin-top: 8px; font-size: 12px; color: var(--text-dim); display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; }
   .detail-grid .k { color: var(--text-dim); }
   .detail-grid .v { color: var(--text); font-family: var(--mono); }
+  .detail-grid .v .badge { margin-left: 0; }
   .table-wrap { overflow-x: auto; }
   .steps-table { margin-top: 8px; width: 100%; border-collapse: collapse; font-size: 12px; min-width: 420px; }
   .steps-table th, .steps-table td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); }
@@ -291,6 +304,7 @@
 let allMandates = [];
 let demoScenarios = [];
 let selectedId = null;
+let GLOSSARY = null;
 
 const FILTER_LABELS = {
   'has:true': 'Escalated only',
@@ -361,6 +375,77 @@ async function fetchMandates() {
 
   renderMandateList();
 }
+
+async function loadGlossaryData() {
+  const res = await fetch('/api/glossary');
+  GLOSSARY = await res.json();
+}
+
+// Tooltip content is resolved lazily against GLOSSARY (fetched once,
+// shared with /help) rather than baked into each badge's HTML at render
+// time -- one source of truth, no separately-maintained copy per badge.
+function resolveTooltip(key) {
+  if (!GLOSSARY || !key) return '';
+  const sep = key.indexOf(':');
+  const kind = key.slice(0, sep);
+  const value = key.slice(sep + 1);
+  if (kind === 'taxonomy') {
+    const row = GLOSSARY.taxonomy.find(r => r.id === value);
+    return row ? `${row.rail} — ${row.failure}` : '';
+  }
+  if (kind === 'escalation') return GLOSSARY.escalation_types[value] || '';
+  if (kind === 'badge') return GLOSSARY.badges[value] || '';
+  return '';
+}
+
+let tooltipEl = null;
+function ensureTooltip() {
+  if (!tooltipEl) {
+    tooltipEl = document.createElement('div');
+    tooltipEl.id = 'badge-tooltip';
+    document.body.appendChild(tooltipEl);
+  }
+  return tooltipEl;
+}
+function showTooltip(target) {
+  const text = resolveTooltip(target.getAttribute('data-tooltip-key'));
+  if (!text) return;
+  const tip = ensureTooltip();
+  tip.innerHTML = `<div class="tip-text">${escapeHtml(text)}</div><a class="tip-link" href="/help" target="_blank" rel="noopener">See full glossary &rarr;</a>`;
+  tip.style.display = 'block';
+  const rect = target.getBoundingClientRect();
+  const tipRect = tip.getBoundingClientRect();
+  let left = rect.left + rect.width / 2 - tipRect.width / 2;
+  left = Math.max(8, Math.min(left, window.innerWidth - tipRect.width - 8));
+  let top = rect.top - tipRect.height - 8;
+  if (top < 8) top = rect.bottom + 8;
+  tip.style.left = left + 'px';
+  tip.style.top = top + 'px';
+}
+function hideTooltip() {
+  if (tooltipEl) tooltipEl.style.display = 'none';
+}
+document.addEventListener('mouseover', e => {
+  const t = e.target.closest('.tooltip-target');
+  if (t) showTooltip(t);
+});
+document.addEventListener('mouseout', e => {
+  const t = e.target.closest('.tooltip-target');
+  if (t) hideTooltip();
+});
+document.addEventListener('focusin', e => {
+  const t = e.target.closest('.tooltip-target');
+  if (t) showTooltip(t);
+});
+document.addEventListener('focusout', e => {
+  const t = e.target.closest('.tooltip-target');
+  if (t) hideTooltip();
+});
+document.addEventListener('click', e => {
+  const t = e.target.closest('.tooltip-target');
+  if (t) { e.preventDefault(); showTooltip(t); return; }
+  if (!e.target.closest('#badge-tooltip')) hideTooltip();
+});
 
 async function loadDemoScenarios() {
   const res = await fetch('/api/demo-scenarios');
@@ -490,6 +575,10 @@ async function selectMandate(id) {
   });
 }
 
+function tooltipBadge(cls, label, tooltipKey) {
+  return `<span class="badge ${cls} tooltip-target" tabindex="0" data-tooltip-key="${tooltipKey}">${escapeHtml(label)}</span>`;
+}
+
 function renderEntry(e, isCurrent) {
   const div = document.createElement('div');
   const color = stageColor(e);
@@ -499,12 +588,18 @@ function renderEntry(e, isCurrent) {
   const icon = STAGE_ICON[e.entry_type] || 'ic-audit';
 
   let badge = '';
-  if (e.entry_type === 'classification') {
-    badge = e.is_llm ? '<span class="badge llm">LLM</span>' : '<span class="badge rule">RULE</span>';
+  if (e.entry_type === 'failure_event') {
+    const code = e.detail.taxonomy_id;
+    badge = tooltipBadge('taxonomy', code, `taxonomy:${code}`);
+  } else if (e.entry_type === 'classification') {
+    badge = e.is_llm ? tooltipBadge('llm', 'LLM', 'badge:llm') : tooltipBadge('rule', 'RULE', 'badge:rule');
   } else if (e.entry_type === 'fallback_message') {
-    badge = e.is_llm ? '<span class="badge llm">LLM</span>' : '<span class="badge safe-default">SAFE DEFAULT</span>';
+    badge = e.is_llm ? tooltipBadge('llm', 'LLM', 'badge:llm') : tooltipBadge('safe-default', 'SAFE DEFAULT', 'badge:safe_default');
+    badge += ' ' + tooltipBadge('escalation-type', e.detail.escalation_type.replace(/_/g, ' ').toUpperCase(), `escalation:${e.detail.escalation_type}`);
   } else if (e.entry_type === 'plan') {
-    badge = e.detail.decision === 'retry' ? '<span class="badge retry">RETRY</span>' : '<span class="badge escalate">ESCALATE</span>';
+    badge = e.detail.decision === 'retry'
+      ? tooltipBadge('retry', 'RETRY', 'badge:retry')
+      : tooltipBadge('escalate', 'ESCALATE', 'badge:escalate');
   }
 
   let body = `
@@ -540,9 +635,10 @@ function renderEntry(e, isCurrent) {
       body += `<div class="detail-grid"><div class="k">expected_value</div><div class="v">${formatRupees(d.expected_value)}</div></div>`;
     }
   } else if (e.entry_type === 'retry_attempt') {
-    const oc = d.outcome === 'success' ? 'outcome-success' : d.outcome === 'failed' ? 'outcome-failed' : 'outcome-noop';
+    const ocKey = d.outcome === 'success' ? 'outcome_success' : d.outcome === 'failed' ? 'outcome_failed' : 'outcome_noop';
+    const ocCls = ocKey.replace('_', '-');
     body += `<div class="detail-grid">
-      <div class="k">outcome</div><div class="v"><span class="badge ${oc}" style="margin-left:0">${d.outcome.toUpperCase()}</span></div>
+      <div class="k">outcome</div><div class="v">${tooltipBadge(ocCls, d.outcome.toUpperCase(), `badge:${ocKey}`)}</div>
       <div class="k">scheduled_at</div><div class="v">${d.scheduled_at.replace('T', ' ')}</div>
       <div class="k">executed_at</div><div class="v">${d.executed_at ? d.executed_at.replace('T', ' ') : '—'}</div>
     </div>`;
@@ -576,6 +672,7 @@ document.getElementById('search').addEventListener('input', () => {
 });
 document.getElementById('escalation-filter').addEventListener('change', fetchMandates);
 
+loadGlossaryData();
 loadDemoScenarios();
 fetchMandates().then(() => {
   const deepLink = new URLSearchParams(location.search).get('mandate');

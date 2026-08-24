@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 
 from app.db import init_db
-from app.docs_glossary import ESCALATION_TYPE_GLOSSARY, parse_demo_scenarios, parse_taxonomy_table
+from app.docs_glossary import BADGE_GLOSSARY, ESCALATION_TYPE_GLOSSARY, parse_demo_scenarios, parse_taxonomy_table
 from app.routers import mandates
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
@@ -52,6 +52,7 @@ def glossary() -> dict:
     return {
         "taxonomy": parse_taxonomy_table(),
         "escalation_types": ESCALATION_TYPE_GLOSSARY,
+        "badges": BADGE_GLOSSARY,
     }
 
 

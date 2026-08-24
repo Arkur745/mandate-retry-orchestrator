@@ -3,7 +3,12 @@
 endpoints it backs."""
 from fastapi.testclient import TestClient
 
-from app.docs_glossary import ESCALATION_TYPE_GLOSSARY, parse_demo_scenarios, parse_taxonomy_table
+from app.docs_glossary import (
+    BADGE_GLOSSARY,
+    ESCALATION_TYPE_GLOSSARY,
+    parse_demo_scenarios,
+    parse_taxonomy_table,
+)
 from app.main import app
 from app.models import EscalationType
 
@@ -35,6 +40,21 @@ def test_parse_demo_scenarios_returns_five_curated_mandates():
         assert row["camera_notes"]
 
 
+def test_badge_glossary_has_expected_keys():
+    assert set(BADGE_GLOSSARY.keys()) == {
+        "rule",
+        "llm",
+        "safe_default",
+        "retry",
+        "escalate",
+        "outcome_success",
+        "outcome_failed",
+        "outcome_noop",
+    }
+    for desc in BADGE_GLOSSARY.values():
+        assert len(desc) > 10
+
+
 def test_glossary_endpoint():
     client = TestClient(app)
     resp = client.get("/api/glossary")
@@ -42,6 +62,7 @@ def test_glossary_endpoint():
     body = resp.json()
     assert len(body["taxonomy"]) == 12
     assert set(body["escalation_types"].keys()) == {t.value for t in EscalationType}
+    assert body["badges"] == BADGE_GLOSSARY
 
 
 def test_demo_scenarios_endpoint():
