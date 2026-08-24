@@ -54,6 +54,11 @@ class ClassificationMethod(str, enum.Enum):
     llm_fallback = "llm_fallback"
 
 
+class PlanDecision(str, enum.Enum):
+    retry = "retry"
+    escalate = "escalate"
+
+
 class Mandate(Base):
     __tablename__ = "mandates"
 
@@ -108,6 +113,9 @@ class FailureEvent(Base):
     classifications: Mapped[list["Classification"]] = relationship(
         back_populates="failure_event", cascade="all, delete-orphan"
     )
+    retry_plans: Mapped[list["RetryPlan"]] = relationship(
+        back_populates="failure_event", cascade="all, delete-orphan"
+    )
 
 
 class RetryAttempt(Base):
@@ -156,6 +164,69 @@ class Classification(Base):
     )
 
     failure_event: Mapped["FailureEvent"] = relationship(back_populates="classifications")
+
+
+class RetryPlan(Base):
+    __tablename__ = "retry_plans"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    failure_event_id: Mapped[int] = mapped_column(
+        ForeignKey("failure_events.id"), nullable=False, index=True
+    )
+    classification_id: Mapped[int] = mapped_column(
+        ForeignKey("classifications.id"), nullable=False, index=True
+    )
+    decision: Mapped[PlanDecision] = mapped_column(
+        Enum(PlanDecision, name="plan_decision_enum"), nullable=False
+    )
+    reasoning: Mapped[str] = mapped_column(Text, nullable=False)
+    expected_value: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+        comment="Total expected value in paise for a 'retry' decision; null for 'escalate'",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+
+    failure_event: Mapped["FailureEvent"] = relationship(back_populates="retry_plans")
+    steps: Mapped[list["PlannedAttempt"]] = relationship(
+        back_populates="retry_plan",
+        cascade="all, delete-orphan",
+        order_by="PlannedAttempt.attempt_number",
+    )
+
+
+class PlannedAttempt(Base):
+    __tablename__ = "planned_attempts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    retry_plan_id: Mapped[int] = mapped_column(
+        ForeignKey("retry_plans.id"), nullable=False, index=True
+    )
+    attempt_number: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        comment="1-indexed TOTAL attempt count for the mandate cycle, matching "
+        "app.constraints' convention (1 = the original failed debit)",
+    )
+    proposed_timestamp: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    implied_notification_timestamp: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        comment="proposed_timestamp - 24h; the planner asserts it will trigger this "
+        "notification, not that one already happened",
+    )
+    success_probability: Mapped[float] = mapped_column(Float, nullable=False)
+    cost: Mapped[float] = mapped_column(Float, nullable=False, comment="Hand-specified cost in paise")
+    constraint_reason: Mapped[str] = mapped_column(
+        Text, nullable=False, comment="The allow reason returned by constraints.check_retry"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+
+    retry_plan: Mapped["RetryPlan"] = relationship(back_populates="steps")
 
 
 class AuditLog(Base):
