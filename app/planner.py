@@ -23,9 +23,12 @@ does; they're planning-model assumptions, and are labeled as such.
 """
 from __future__ import annotations
 
+import dataclasses
 import itertools
+import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from sqlalchemy.orm import Session
 
@@ -191,6 +194,54 @@ CATEGORY_PROFILES: dict[str, TimingProfile] = {
     "P12": _CAUTIOUS_SINGLE,  # same treatment as P3: genuinely uncertain, one cautious retry.
 }
 
+# Calibration adoption target -- see docs/calibration.md and
+# scripts/adopt_priors.py. This file does NOT exist by default; nothing
+# below changes any behavior unless a human has explicitly run
+# scripts/adopt_priors.py, which writes it. Deliberately per-taxonomy_id,
+# not per-profile: several categories above SHARE one TimingProfile object
+# (P2/P9 both use _FAST_TECHNICAL, P3/P12 both use _CAUTIOUS_SINGLE), and
+# adopting a calibrated value for P2 alone must not silently also change
+# P9's effective probability -- _effective_profile below returns a
+# per-category COPY with only the named category's numbers overridden,
+# never mutates the shared module-level objects.
+PRIORS_ACTIVE_PATH = Path(__file__).resolve().parent / "priors_active.json"
+
+
+def _load_active_overrides() -> dict[str, dict]:
+    """Re-read on every call, not cached at import: an adoption should
+    take effect on the planner's very next run, with no process restart
+    or code change needed. The file is tiny and plan_retries is not a
+    hot loop, so re-reading costs nothing worth optimizing away. Missing
+    or unparseable file -> no overrides, not an error -- the planner must
+    never fail to plan because of a calibration artifact."""
+    if not PRIORS_ACTIVE_PATH.exists():
+        return {}
+    try:
+        data = json.loads(PRIORS_ACTIVE_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _effective_profile(taxonomy_id: str) -> TimingProfile | None:
+    """The profile plan_retries actually uses: CATEGORY_PROFILES' hand-
+    specified values, with base_probability/decay_per_step replaced ONLY
+    for a taxonomy_id explicitly named in priors_active.json. Everything
+    else about the profile (timing slots, max_attempts_override,
+    rationale text) is untouched -- calibration only ever proposes/adopts
+    the two probability-model numbers, never the timing search space."""
+    profile = CATEGORY_PROFILES.get(taxonomy_id)
+    if profile is None:
+        return None
+    override = _load_active_overrides().get(taxonomy_id)
+    if not override:
+        return profile
+    return dataclasses.replace(
+        profile,
+        base_probability=override.get("base_p", profile.base_probability),
+        decay_per_step=override.get("decay", profile.decay_per_step),
+    )
+
 
 @dataclass(frozen=True)
 class _Candidate:
@@ -332,7 +383,7 @@ def plan_retries(
             commit=commit,
         )
 
-    profile = CATEGORY_PROFILES.get(failure_event.taxonomy_id)
+    profile = _effective_profile(failure_event.taxonomy_id)
     if profile is None:
         return _escalate(
             db,

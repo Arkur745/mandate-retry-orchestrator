@@ -5,3 +5,10 @@ __pycache__/
 *.db
 .DS_Store
 .pytest_cache/
+
+# Calibration draft output (scripts/propose_priors.py) -- regenerable any
+# time from calibration_report.py, not meant to be committed. The ADOPTED
+# file, app/priors_active.json, is deliberately NOT ignored: it's the
+# live-planner override state and should be reviewable/committed when a
+# human actually adopts a calibrated value (see docs/calibration.md).
+app/priors_proposed.json
