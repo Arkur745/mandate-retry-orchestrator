@@ -628,10 +628,34 @@ function renderTrace(mandate, entries) {
   );
   const failureEventIds = entries.filter(e => e.entry_type === 'failure_event').map(e => e.detail.id);
   const mostRecentFailureEventId = failureEventIds[failureEventIds.length - 1];
+  const mostRecentEntry = entries[entries.length - 1];
 
-  entries.forEach((e, i) => {
-    if (e.entry_type === 'failure_event' && liveIds.has(e.detail.id)) {
-      const isMostRecent = e.detail.id === mostRecentFailureEventId;
+  // The API returns entries in true chronological order (oldest first --
+  // required for computeSummary's first/last-occurrence logic above, and
+  // for GET /mandates/{id}/trace's own documented contract). The
+  // timeline display, though, should surface the newest failure first so
+  // a just-triggered simulate run doesn't require scrolling to the
+  // bottom to see. Group by failure_event and reverse the *groups*, but
+  // keep each group's own entries in their original causal order --
+  // reversing individual entries too would render a fallback message
+  // above the failure it explains, which reads backwards. Safe to assume
+  // each failure_event's entries arrive contiguously: build_mandate_trace
+  // sorts primarily by the owning event's occurred_at (see its docstring)
+  // specifically so a slow LLM call on one event can't interleave its
+  // entries with a different, faster event's.
+  const groups = [];
+  for (const e of entries) {
+    if (e.entry_type === 'failure_event') {
+      groups.push([e]);
+    } else {
+      groups[groups.length - 1].push(e);
+    }
+  }
+
+  for (const group of groups.slice().reverse()) {
+    const first = group[0];
+    if (first.entry_type === 'failure_event' && liveIds.has(first.detail.id)) {
+      const isMostRecent = first.detail.id === mostRecentFailureEventId;
       const banner = document.createElement('div');
       banner.className = 'live-run-banner' + (isMostRecent ? '' : ' stale');
       banner.innerHTML = isMostRecent
@@ -639,8 +663,10 @@ function renderTrace(mandate, entries) {
         : '<span class="dot"></span> Previously simulated run (not the current one)';
       timeline.appendChild(banner);
     }
-    timeline.appendChild(renderEntry(e, i === entries.length - 1));
-  });
+    for (const e of group) {
+      timeline.appendChild(renderEntry(e, e === mostRecentEntry));
+    }
+  }
 }
 
 async function loadSimulateOptions(mandateId) {

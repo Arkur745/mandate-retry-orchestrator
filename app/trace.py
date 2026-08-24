@@ -58,6 +58,12 @@ class TraceEntry:
     label: str
     is_llm: bool
     detail: dict = field(default_factory=dict)
+    # Internal only -- not part of TraceEntryOut's field list, so it never
+    # reaches the API response. Always the occurred_at of the
+    # failure_event this entry was generated under (see build_mandate_trace
+    # below); exists purely so the final sort can keep one event's whole
+    # downstream story contiguous, see that function's docstring.
+    group_key: datetime | None = field(default=None, repr=False)
 
 
 def _audit_label(event_type: str) -> str:
@@ -187,7 +193,9 @@ def build_mandate_trace(db: Session, mandate: Mandate) -> list[TraceEntry]:
     )
 
     for event in events:
-        entries.append(
+        event_entries: list[TraceEntry] = []
+
+        event_entries.append(
             TraceEntry(
                 timestamp=event.occurred_at,
                 entry_type="failure_event",
@@ -209,7 +217,7 @@ def build_mandate_trace(db: Session, mandate: Mandate) -> list[TraceEntry]:
             .all()
         )
         for cls in classifications:
-            entries.append(_classification_entry(cls))
+            event_entries.append(_classification_entry(cls))
 
         plans = (
             db.query(RetryPlan)
@@ -222,10 +230,10 @@ def build_mandate_trace(db: Session, mandate: Mandate) -> list[TraceEntry]:
         plan_ids: list[int] = []
         for plan in plans:
             plan_ids.append(plan.id)
-            entries.append(_plan_entry(plan))
+            event_entries.append(_plan_entry(plan))
 
             for msg in plan.fallback_messages:
-                entries.append(_fallback_message_entry(msg))
+                event_entries.append(_fallback_message_entry(msg))
 
         retry_attempts = (
             db.query(RetryAttempt)
@@ -235,7 +243,7 @@ def build_mandate_trace(db: Session, mandate: Mandate) -> list[TraceEntry]:
         )
         for attempt in retry_attempts:
             attempt_ids.append(attempt.id)
-            entries.append(_retry_attempt_entry(attempt))
+            event_entries.append(_retry_attempt_entry(attempt))
 
         audit_rows = (
             db.query(AuditLog)
@@ -257,20 +265,41 @@ def build_mandate_trace(db: Session, mandate: Mandate) -> list[TraceEntry]:
             .all()
         )
         for row in audit_rows:
-            entries.append(_audit_log_entry(row))
+            event_entries.append(_audit_log_entry(row))
 
-    # Sort key truncates to whole-second precision, not the full sort key:
-    # SQLite's CURRENT_TIMESTAMP (used for created_at server defaults) has
+        # group_key is this event's own occurred_at for every entry
+        # downstream of it -- see the sort below for why.
+        for e in event_entries:
+            e.group_key = event.occurred_at
+        entries.extend(event_entries)
+
+    # Two-level sort: group_key (the owning failure_event's occurred_at)
+    # is the PRIMARY key, so one event's whole downstream story
+    # (classification, plan, attempts, fallback) always stays contiguous
+    # -- without this, a slow real-LLM classification on an earlier event
+    # can finish (get its created_at stamped) *after* a later, faster
+    # rule-classified event has already finished processing, which would
+    # otherwise interleave the two events' entries in a way that reads as
+    # broken (e.g. a P8 classification card appearing directly under a P2
+    # failure card). group_key is deliberately NOT truncated: it's always
+    # event.occurred_at, a single Python-stamped column (via
+    # app.simulator's utcnow()) that reliably carries microseconds, unlike
+    # the mixed SQLite-CURRENT_TIMESTAMP-vs-Python-Clock timestamps
+    # entries themselves carry -- batch-seeded events routinely land in
+    # the same *second*, so truncating this key would collapse exactly
+    # the distinction it exists to preserve. Within one event's group, the
+    # entry's own truncated timestamp + stage order is still the
+    # tiebreak, for that original (still real) reason: SQLite's
+    # CURRENT_TIMESTAMP (used for most created_at server defaults) has
     # only 1-second resolution, while some Python-side timestamps
     # (RetryAttempt.executed_at, stamped via app.executor's Clock) carry
-    # microseconds. Comparing those directly can make an audit_log row
-    # that was actually written a moment *after* the attempt it describes
-    # sort *before* it, just because its truncated value happens to be
-    # numerically smaller. Truncating the sort key (not the displayed
-    # `timestamp` field, which keeps full precision) means same-second
-    # entries fall back to stage order + construction order (stable sort),
-    # which reflects the real causal sequence.
+    # microseconds, so truncating avoids a same-second race in either
+    # value flipping two entries' displayed order.
     entries.sort(
-        key=lambda e: (e.timestamp.replace(microsecond=0), _STAGE_ORDER.get(e.entry_type, 99))
+        key=lambda e: (
+            e.group_key,
+            e.timestamp.replace(microsecond=0),
+            _STAGE_ORDER.get(e.entry_type, 99),
+        )
     )
     return entries
