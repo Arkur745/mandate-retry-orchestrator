@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     razorpay_key_id: str = ""
     razorpay_key_secret: str = ""
     groq_api_key: str = ""
+    groq_model: str = "openai/gpt-oss-20b"
 
 
 settings = Settings()

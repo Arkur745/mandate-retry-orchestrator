@@ -12,6 +12,7 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     Enum,
+    Float,
     ForeignKey,
     Integer,
     JSON,
@@ -45,6 +46,12 @@ class RetryOutcome(str, enum.Enum):
     success = "success"
     failed = "failed"
     skipped = "skipped"
+
+
+class ClassificationMethod(str, enum.Enum):
+    rule = "rule"
+    llm = "llm"
+    llm_fallback = "llm_fallback"
 
 
 class Mandate(Base):
@@ -98,6 +105,9 @@ class FailureEvent(Base):
     retry_attempts: Mapped[list["RetryAttempt"]] = relationship(
         back_populates="failure_event", cascade="all, delete-orphan"
     )
+    classifications: Mapped[list["Classification"]] = relationship(
+        back_populates="failure_event", cascade="all, delete-orphan"
+    )
 
 
 class RetryAttempt(Base):
@@ -120,6 +130,32 @@ class RetryAttempt(Base):
     )
 
     failure_event: Mapped["FailureEvent"] = relationship(back_populates="retry_attempts")
+
+
+class Classification(Base):
+    __tablename__ = "classifications"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    failure_event_id: Mapped[int] = mapped_column(
+        ForeignKey("failure_events.id"), nullable=False, index=True
+    )
+    method: Mapped[ClassificationMethod] = mapped_column(
+        Enum(ClassificationMethod, name="classification_method_enum"), nullable=False
+    )
+    recoverable: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
+    suggested_max_attempts: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        comment="Set only when a fallback path caps retries (e.g. S1: LLM output "
+        "invalid -> ambiguous, eligible for exactly one cautious retry)",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+
+    failure_event: Mapped["FailureEvent"] = relationship(back_populates="classifications")
 
 
 class AuditLog(Base):
