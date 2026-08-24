@@ -1,6 +1,7 @@
 """Tests for app/executor.py -- S3 (idempotency), S4 (concurrency), S5
-(API backoff), and time-scaled scheduling.
+(API backoff), S9 (audit log write failure), and time-scaled scheduling.
 """
+import sqlite3
 import threading
 import time
 from datetime import datetime, timedelta
@@ -396,3 +397,95 @@ def test_scheduler_fires_and_executes_job(db: Session):
     db.expire_all()
     final_row = db.get(RetryAttempt, rows[0].id)
     assert final_row.outcome == RetryOutcome.success
+
+
+# ---- Day 9 Part C: S9 -- a real DB write failure during audit logging ----
+#
+# Not a mocked Python exception in isolation -- a SQLAlchemy
+# before_cursor_execute hook that intercepts the actual SQL statement
+# reaching the DBAPI and raises a genuine sqlite3.OperationalError only
+# for INSERT INTO audit_log, leaving every other statement untouched.
+# This simulates what a real transient DB failure (disk I/O error, lock
+# timeout) hitting specifically the audit-log write would look like.
+
+
+def _make_audit_log_failing_engine():
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def _fail_audit_log_inserts(conn, cursor, statement, parameters, context, executemany):
+        if statement.strip().startswith("INSERT INTO audit_log"):
+            raise sqlite3.OperationalError("simulated disk I/O error writing audit_log")
+
+    return engine
+
+
+def test_audit_log_write_failure_fails_loudly_not_silently(tmp_path):
+    engine = _make_audit_log_failing_engine()
+    Base.metadata.create_all(engine)
+    SessionFactory = sessionmaker(bind=engine)
+    db = SessionFactory()
+
+    mandate = make_mandate(db)
+    event_row = FailureEvent(
+        mandate_id=mandate.id, taxonomy_id="P2", raw_reason_text="x", occurred_at=OCCURRED_AT
+    )
+    db.add(event_row)
+    db.commit()
+    retry_attempt = RetryAttempt(
+        failure_event_id=event_row.id,
+        attempt_number=2,
+        scheduled_at=OCCURRED_AT + timedelta(hours=1),
+        outcome=RetryOutcome.pending,
+        idempotency_key=idempotency_key_for(mandate.id, event_row.id, 2),
+    )
+    db.add(retry_attempt)
+    db.commit()
+    row_id = retry_attempt.id
+
+    # The pipeline must not silently continue past the unlogged step --
+    # it must fail loudly (raise), not return a row claiming success/failed
+    # with no audit trail to explain what happened.
+    with pytest.raises(sqlite3.OperationalError):
+        claim_and_execute(db, row_id, mandate, clock=Clock(scale=1.0))
+
+    db.rollback()
+    row = db.get(RetryAttempt, row_id)
+    # Never a false "success" shipped without its audit entry -- the
+    # state-change commit (which would have set success/failed) rolled
+    # back atomically together with the failed audit_log insert.
+    assert row.outcome != RetryOutcome.success
+    assert row.outcome != RetryOutcome.failed
+    assert db.query(AuditLog).count() == 0
+
+
+def test_audit_log_write_failure_leaves_no_misleading_audit_trail(tmp_path):
+    # Companion check: confirm there is no PARTIAL audit_log row either
+    # (e.g. a half-written entry) -- the failed insert leaves zero rows,
+    # not a corrupt one.
+    engine = _make_audit_log_failing_engine()
+    Base.metadata.create_all(engine)
+    SessionFactory = sessionmaker(bind=engine)
+    db = SessionFactory()
+
+    mandate = make_mandate(db)
+    event_row = FailureEvent(
+        mandate_id=mandate.id, taxonomy_id="P2", raw_reason_text="x", occurred_at=OCCURRED_AT
+    )
+    db.add(event_row)
+    db.commit()
+    retry_attempt = RetryAttempt(
+        failure_event_id=event_row.id,
+        attempt_number=2,
+        scheduled_at=OCCURRED_AT + timedelta(hours=1),
+        outcome=RetryOutcome.pending,
+        idempotency_key=idempotency_key_for(mandate.id, event_row.id, 2),
+    )
+    db.add(retry_attempt)
+    db.commit()
+
+    with pytest.raises(sqlite3.OperationalError):
+        claim_and_execute(db, retry_attempt.id, mandate, clock=Clock(scale=1.0))
+
+    db.rollback()
+    assert db.query(AuditLog).count() == 0

@@ -289,6 +289,44 @@ class TestDeadZoneFix:
             assert len(plan.steps) == 0
 
 
+# ---- Day 9 Part C: S7 -- negative-EV plan must escalate, not pick the least-bad option ----
+
+
+class TestNegativeExpectedValueEscalates:
+    def test_every_candidate_negative_ev_escalates_not_least_bad(self, db: Session):
+        # Mandate amount tiny enough that BASE_COST_PAISE (200) exceeds
+        # p*amount for every candidate in every profile -- cautious_single's
+        # single 48h-offset candidate at base_probability=0.45 gives
+        # 0.45*100 - 200 = -155 paise, unambiguously negative, and there's
+        # no second, less-bad candidate to fall back to (max_attempts_override=1).
+        mandate = make_mandate(db, Rail.upi_autopay, amount=100)  # INR 1.00
+        event = make_event(db, mandate, "P3")
+        cls = make_classification(db, event, recoverable=True, confidence=0.9)
+
+        plan = plan_retries(db, event, cls, mandate)
+
+        assert plan.decision == PlanDecision.escalate
+        assert plan.escalation_reason_code.value == "negative_expected_value"
+        assert plan.expected_value is None  # escalate plans never carry an EV
+        assert len(plan.steps) == 0
+        assert "not worth retrying" in plan.reasoning.lower()
+
+    def test_negative_ev_case_still_ran_a_real_search_not_a_shortcut(self, db: Session):
+        # Distinguish this from the "all vetoed" (S6) and "not recoverable"
+        # (no search attempted) escalate paths -- this one must show
+        # evidence a real candidate was found and evaluated, just rejected
+        # on value, not that the search space was empty or skipped.
+        mandate = make_mandate(db, Rail.upi_autopay, amount=100)
+        event = make_event(db, mandate, "P3")
+        cls = make_classification(db, event, recoverable=True, confidence=0.9)
+
+        plan = plan_retries(db, event, cls, mandate)
+
+        assert "expected value" in plan.reasoning.lower()
+        assert "vetoed" not in plan.reasoning.lower()
+        assert "no search attempted" not in plan.reasoning.lower()
+
+
 # ---- Plan is queryable / persisted correctly ----
 
 

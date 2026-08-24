@@ -226,13 +226,15 @@ S_CHECKLIST_DEFINITIONS: dict[str, dict] = {
     },
     "S7": {
         "description": "Retry planner produces a low-value/negative-expected-value plan",
-        "tests": [],
+        "tests": [
+            "tests/test_planner.py::TestNegativeExpectedValueEscalates::test_every_candidate_negative_ev_escalates_not_least_bad",
+            "tests/test_planner.py::TestNegativeExpectedValueEscalates::test_negative_ev_case_still_ran_a_real_search_not_a_shortcut",
+        ],
         "note": (
-            "GAP: the code path exists (app.planner.EV_ESCALATE_THRESHOLD_PAISE check, "
-            "'best.expected_value <= EV_ESCALATE_THRESHOLD_PAISE' branch in plan_retries) but no "
-            "test in the suite drives a scenario to that specific branch -- every existing escalate "
-            "test hits not_recoverable, low_confidence, or all_candidates_vetoed instead. Flagging "
-            "per Day 8 scope (not fixing); a Day 9 candidate."
+            "Fixed Day 9 Part C. A tiny-amount mandate (INR 1.00) makes BASE_COST_PAISE exceed "
+            "p*amount for every candidate, driving execution to the "
+            "'best.expected_value <= EV_ESCALATE_THRESHOLD_PAISE' branch specifically, distinct "
+            "from the not_recoverable/all_candidates_vetoed escalate paths."
         ),
     },
     "S8": {
@@ -245,15 +247,20 @@ S_CHECKLIST_DEFINITIONS: dict[str, dict] = {
     },
     "S9": {
         "description": "Audit log write fails mid-pipeline",
-        "tests": [],
+        "tests": [
+            "tests/test_executor.py::test_audit_log_write_failure_fails_loudly_not_silently",
+            "tests/test_executor.py::test_audit_log_write_failure_leaves_no_misleading_audit_trail",
+        ],
         "note": (
-            "GAP: no test simulates a DB write failure during an audit_log insert. Architecturally, "
-            "most audit_log writes share a single commit with the primary state change they "
-            "describe (e.g. app.executor.claim_and_execute commits the retry_attempts outcome "
-            "change and its audit_log row together), which incidentally prevents a state change "
-            "from persisting without its audit trail -- but this is implicit atomicity, not an "
-            "explicit 'retry the write or fail loudly' mechanism, and it is unverified by any test. "
-            "Flagging per Day 8 scope (not fixing); a Day 9 candidate."
+            "Fixed Day 9 Part C. Tests use a SQLAlchemy before_cursor_execute hook to raise a "
+            "genuine sqlite3.OperationalError only for 'INSERT INTO audit_log' statements (not a "
+            "mocked Python exception) -- confirmed the pipeline fails loudly (exception propagates) "
+            "and never persists a state change without its paired audit_log row (same-transaction "
+            "atomicity). Related but separate finding surfaced by this test, NOT fixed (out of "
+            "Part C's scope): the retry_attempts row is left permanently stuck in 'executing' "
+            "state, since the pending->executing claim is a separate, already-committed "
+            "transaction before the later failure -- there is currently no mechanism to detect or "
+            "reclaim a row stuck in 'executing'. See docs/eval_audit.md Day 9 Part C entry."
         ),
     },
 }
