@@ -1,5 +1,7 @@
 """Tests for app/planner.py."""
-from datetime import datetime, timedelta
+from datetime import datetime
+from datetime import time as dtime
+from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
@@ -212,6 +214,79 @@ class TestAllVetoedEscalates:
 
         assert plan.decision == PlanDecision.escalate
         assert len(plan.steps) == 0
+
+
+# ---- Day 9: window-aware candidate shifting fixes the time-of-day dead zone ----
+#
+# Real finding (docs/eval_audit.md, Day 8/9): a P2/upi_autopay failure that
+# occurs with an IST clock time roughly in [09:30,12:00) or [16:30,20:30)
+# used to produce ZERO valid candidates -- fast_technical's first two
+# slots (0.5h/1h) land inside the UPI peak window (10:00-13:00 or
+# 17:00-21:30) regardless of which of the two offsets is tried, and since
+# sequences only use consecutive slots starting at 0, the whole search
+# space was empty. Same category, same rail, same mandate -- the only
+# variable was what time of day the failure happened to occur. Fixed by
+# making candidate timestamps window-aware (app.constraints.
+# next_non_peak_window_start), not by relaxing anything in
+# app.constraints itself.
+
+
+class TestDeadZoneFix:
+    def test_same_p2_upi_failure_now_plans_regardless_of_time_of_day(self, db: Session):
+        # 17:05 IST = 11:35 UTC on 2026-08-24 -- the exact occurred_at
+        # region that produced 0 candidates before this fix (confirmed via
+        # a full-day sweep of app.planner._search_candidates, see the Day 9
+        # eval_audit.md entry). 14:30 IST (this file's OCCURRED_AT
+        # constant) was already fine and must remain fine.
+        dead_zone_time = datetime(2026, 8, 24, 11, 35, 0)  # 17:05 IST
+
+        mandate_dead_zone = make_mandate(db, Rail.upi_autopay)
+        event_dead_zone = make_event(db, mandate_dead_zone, "P2", occurred_at=dead_zone_time)
+        cls_dead_zone = make_classification(db, event_dead_zone, recoverable=True, confidence=0.9)
+        plan_dead_zone = plan_retries(db, event_dead_zone, cls_dead_zone, mandate_dead_zone)
+
+        mandate_safe = make_mandate(db, Rail.upi_autopay)
+        event_safe = make_event(db, mandate_safe, "P2", occurred_at=OCCURRED_AT)  # 14:30 IST
+        cls_safe = make_classification(db, event_safe, recoverable=True, confidence=0.9)
+        plan_safe = plan_retries(db, event_safe, cls_safe, mandate_safe)
+
+        assert plan_dead_zone.decision == PlanDecision.retry, (
+            f"still escalating in the old dead zone: {plan_dead_zone.reasoning}"
+        )
+        assert plan_safe.decision == PlanDecision.retry
+        assert len(plan_dead_zone.steps) >= 1
+        assert len(plan_safe.steps) >= 1
+
+    def test_shifted_attempts_still_land_in_a_non_peak_window(self, db: Session):
+        dead_zone_time = datetime(2026, 8, 24, 11, 35, 0)  # 17:05 IST
+        mandate = make_mandate(db, Rail.upi_autopay)
+        event = make_event(db, mandate, "P2", occurred_at=dead_zone_time)
+        cls = make_classification(db, event, recoverable=True, confidence=0.9)
+        plan = plan_retries(db, event, cls, mandate)
+
+        assert plan.decision == PlanDecision.retry
+        for step in plan.steps:
+            ist_time = (step.proposed_timestamp + timedelta(hours=5, minutes=30)).time()
+            in_non_peak = (
+                dtime(13, 0) <= ist_time < dtime(17, 0)
+                or ist_time >= dtime(21, 30)
+                or ist_time < dtime(10, 0)
+            )
+            assert in_non_peak, f"attempt #{step.attempt_number} at {ist_time} IST is still in a peak window"
+
+    def test_known_structural_collision_is_unaffected_by_the_dead_zone_fix(self, db: Session):
+        # P9/card_emandate must still ALWAYS escalate -- this is the
+        # separate, principled rail-spacing collision from Day 5/6, not a
+        # time-of-day artifact, and the fix must not touch it. Try both a
+        # formerly-dead-zone time and a formerly-safe time; both must
+        # still escalate identically.
+        for occurred_at in [datetime(2026, 8, 24, 11, 35, 0), OCCURRED_AT]:
+            mandate = make_mandate(db, Rail.card_emandate)
+            event = make_event(db, mandate, "P9", occurred_at=occurred_at)
+            cls = make_classification(db, event, recoverable=True, confidence=0.9)
+            plan = plan_retries(db, event, cls, mandate)
+            assert plan.decision == PlanDecision.escalate
+            assert len(plan.steps) == 0
 
 
 # ---- Plan is queryable / persisted correctly ----

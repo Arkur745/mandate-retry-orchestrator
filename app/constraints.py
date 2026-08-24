@@ -157,6 +157,41 @@ def _is_non_peak_ist(t: time) -> bool:
     return (time(13, 0) <= t < time(17, 0)) or t >= time(21, 30) or t < time(10, 0)
 
 
+def next_non_peak_window_start(dt_utc: datetime, rail: Rail) -> datetime:
+    """Pure utility, NOT part of check_retry's veto logic and does not
+    change check_retry's behavior at all -- check_retry still vetoes a bad
+    proposal blindly, exactly as before. This exists for a caller (the
+    planner) that wants to propose a *better* candidate instead of one
+    that's guaranteed to be vetoed: if `rail` enforces non-peak windows
+    (currently upi_autopay only) and dt_utc's IST time falls inside a peak
+    window, returns the next UTC timestamp at which a non-peak window
+    begins. Otherwise (already non-peak, or `rail` doesn't enforce
+    windows) returns dt_utc unchanged.
+
+    Added Day 9 in response to a real finding: fixed relative offsets (as
+    used by app.planner's timing profiles) can land inside a peak window
+    purely as a function of what time of day the originating failure
+    occurred -- see docs/eval_audit.md's 2026-08-24 (Day 8) and Day 9
+    entries. This function is the fix's building block; the planner is
+    what actually uses it when constructing candidate timestamps.
+    """
+    rules = RAIL_RULES[rail]
+    if not rules.enforce_non_peak_windows:
+        return dt_utc
+
+    ist = _to_ist(dt_utc)
+    t = ist.time()
+    if _is_non_peak_ist(t):
+        return dt_utc
+
+    # t is in a peak window: [10:00,13:00) or [17:00,21:30).
+    if t < time(13, 0):
+        next_ist = datetime.combine(ist.date(), time(13, 0))
+    else:
+        next_ist = datetime.combine(ist.date(), time(21, 30))
+    return next_ist - IST_OFFSET
+
+
 def check_retry(
     mandate: Mandate,
     proposed_attempt_number: int,

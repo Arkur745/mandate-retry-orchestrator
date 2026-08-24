@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from app.constraints import AFA_EXEMPT_THRESHOLD_PAISE, check_retry
+from app.constraints import AFA_EXEMPT_THRESHOLD_PAISE, check_retry, next_non_peak_window_start
 from app.models import Mandate, MandateStatus, Rail
 
 # A day picked arbitrarily but consistent across tests.
@@ -228,3 +228,36 @@ def test_invalid_attempt_number_raises():
     mandate = make_mandate(Rail.upi_autopay)
     with pytest.raises(ValueError):
         check_retry(mandate, 0, DAY)
+
+
+# ---- next_non_peak_window_start (Day 9): pure utility, not part of check_retry's veto ----
+
+
+def test_next_non_peak_window_start_shifts_morning_peak_to_13_00():
+    shifted = next_non_peak_window_start(ist(11, 0), Rail.upi_autopay)
+    assert shifted == ist(13, 0)
+
+
+def test_next_non_peak_window_start_shifts_evening_peak_to_21_30():
+    shifted = next_non_peak_window_start(ist(19, 0), Rail.upi_autopay)
+    assert shifted == ist(21, 30)
+
+
+def test_next_non_peak_window_start_leaves_non_peak_timestamps_unchanged():
+    ts = ist(14, 0)
+    assert next_non_peak_window_start(ts, Rail.upi_autopay) == ts
+
+
+def test_next_non_peak_window_start_is_a_noop_for_rails_without_window_enforcement():
+    ts = ist(11, 0)  # would be a peak window on UPI
+    assert next_non_peak_window_start(ts, Rail.e_nach) == ts
+    assert next_non_peak_window_start(ts, Rail.card_emandate) == ts
+
+
+def test_next_non_peak_window_start_does_not_change_check_retry_veto_behavior():
+    # The whole point: this utility helps a CALLER propose a better
+    # candidate, but check_retry itself must still blindly veto a bad one.
+    mandate = make_mandate(Rail.upi_autopay)
+    peak_ts = ist(11, 0)
+    result = check_retry(mandate, 2, peak_ts, last_notification_at=peak_ts - timedelta(hours=48))
+    assert result.allowed is False

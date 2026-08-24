@@ -25,3 +25,27 @@ Chronological log of bugs found, failure modes triggered, and fixes made - writt
 **Scope, relative to the known Day 5/6 P9 finding:** that finding was rail-specific (e_nach/card_emandate's spacing floor). This one is **time-of-day-specific and rail-independent** — it affects P2 (any rail) and P9 (card_emandate) alike, for roughly 4.5 hours of every 24, including on UPI where no other known issue exists. It's a materially bigger gap than previously understood.
 
 **Not fixed (Day 8 is eval/report only, per scope) — flagged for Day 9.** Candidate fix directions to evaluate then, not decided now: widen `fast_technical`'s first-slot offsets so at least one choice can always clear a 4-hour-wide window regardless of `occurred_at`, or have the search consider slot 3 in isolation (skip-ahead) when slots 1-2 are infeasible, or something else — deliberately not choosing here.
+
+---
+
+## 2026-08-24 (Day 9, Part A) — Dead zone was NOT isolated to `fast_technical`; fixed with window-aware candidate shifting
+
+**Deliberate full sweep** (not accidental discovery this time): tested every `(category, rail)` combination the simulator can actually produce, across a full 24h cycle in 1-minute increments, counting how many `occurred_at` values yield zero valid candidates. Result — the Day 8 finding was an undercount:
+
+| Category / rail | Before fix |
+|---|---|
+| P1 (`delayed_funds`) / upi_autopay | **Dead 31.2%** of the day: 10:00–13:00, 17:00–21:30 IST |
+| P2 (`fast_technical`) / upi_autopay | **Dead 27.1%**: 09:30–12:00, 16:30–20:30 IST |
+| P3 (`cautious_single`) / upi_autopay | **Dead 31.2%**: 10:00–13:00, 17:00–21:30 IST |
+| P7 (`notification_window`) / upi_autopay | **Dead 31.2%**: 09:00–12:00, 16:00–20:30 IST |
+| P12 (`cautious_single`) / upi_autopay | **Dead 31.2%**: 10:00–13:00, 17:00–21:30 IST |
+| P1 / e_nach, P3 / card_emandate or e_nach, P10 / e_nach, P12 / card_emandate or e_nach | Clean |
+| P2 / e_nach, P2 / card_emandate, P9 / card_emandate | **Always dead, 100%, all day** |
+
+**Root cause, general form:** `delayed_funds`'s 24h/72h/168h offsets and `cautious_single`'s 48h offset are all exact multiples of 24h — they land at the *identical* IST clock time as `occurred_at` itself. If that time-of-day happens to be a UPI peak window, *every* offset in the profile is equally bad (not just some), so the whole profile goes dead, not just degrades. `fast_technical`/`notification_window`'s sub-day offsets create their own, differently-shaped dead windows for the same underlying reason (fixed relative offset, blind to where the actual window boundaries are).
+
+**The always-dead 100% rows (P2/e_nach, P2/card_emandate, P9/card_emandate) are a different, separate thing and were deliberately left untouched**: those are the Day 5/6 finding — `e_nach`/`card_emandate`'s 24h minimum-spacing floor (measured from the original failure) is simply incompatible with `fast_technical`'s sub-day first offset, regardless of what time of day it is. That's a principled collision between two independently-reasonable rules; the partial dead zones above are not — same category, same rail, same mandate, and the only variable was clock time. A merchant has no defensible answer for "why did my 4pm outage auto-retry but my 5pm one didn't."
+
+**Fix:** `app.constraints.next_non_peak_window_start(dt_utc, rail)` — a new, pure utility function, *not* a change to `check_retry`'s veto behavior (the constraint store still blindly rejects a bad proposal exactly as before; Day 4's own design comment already anticipated this split: *"Re-proposing a corrected timestamp is the planner's job, not this module's."*). `app.planner._search_candidates` now runs each candidate timestamp through this before checking it: if a rail enforces non-peak windows and the raw `occurred_at + offset` lands in a peak window, it's shifted forward to that window's next opening, with ordering preserved across the sequence (a later step's raw anchor is bumped forward if an earlier step's shift pushed past it).
+
+**Verified:** re-ran the identical full-day sweep after the fix. All five partial dead zones (P1/P2/P3/P7/P12 on upi_autopay) are now clean at every sampled minute. The three always-dead rows are byte-for-byte unchanged (still 100% dead) — confirming the fix is surgical and doesn't paper over the real structural collision. Regression tests: `tests/test_planner.py::TestDeadZoneFix` (same P2/upi_autopay category+mandate at the old dead-zone time and a known-safe time, both now plan successfully; shifted attempts verified to land in a non-peak window; P9/card_emandate confirmed to still escalate identically at both times) and `tests/test_constraints.py` (5 new unit tests for `next_non_peak_window_start` directly).

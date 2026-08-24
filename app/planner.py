@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
 
-from app.constraints import check_retry
+from app.constraints import check_retry, next_non_peak_window_start
 from app.models import (
     Classification,
     EscalationReasonCode,
@@ -211,18 +211,42 @@ def _search_candidates(
     """Every valid (constraint-passing) candidate sequence, of every length
     from 1 up to max_attempts, exploring each slot's candidate offsets.
     Returns them all (not just the best) so callers/tests/scripts can
-    inspect the full search, not just the winner."""
+    inspect the full search, not just the winner.
+
+    Candidate timestamps are window-aware (Day 9 fix): a profile's offsets
+    are fixed hours-since-occurred_at, but if that raw target lands inside
+    a peak window on a window-enforcing rail (currently upi_autopay), it's
+    shifted forward to the next non-peak window opening via
+    app.constraints.next_non_peak_window_start rather than left to be
+    blindly vetoed. This matters because several profiles' offsets are
+    either sub-day (fast_technical, notification_window) or exact 24h
+    multiples (delayed_funds's 24/72/168h, cautious_single's 48h) -- the
+    latter land at the SAME clock time as occurred_at, so if that time of
+    day happens to be a peak window, every offset in the profile is
+    equally bad and the entire search space was silently empty, purely as
+    a function of what time of day the failure occurred (see
+    docs/eval_audit.md's Day 8/9 entries). The constraint store's veto
+    logic itself is unchanged -- check_retry still blindly rejects a bad
+    timestamp; this only changes what timestamp the planner proposes."""
     usable_slots = profile.slot_offsets_hours[:max_attempts]
     valid: list[_Candidate] = []
 
     for length in range(1, len(usable_slots) + 1):
         for combo in itertools.product(*usable_slots[:length]):
             if any(combo[i] >= combo[i + 1] for i in range(len(combo) - 1)):
-                continue  # offsets must strictly increase across the sequence
+                continue  # offsets must strictly increase across the sequence (pre-shift)
 
-            timestamps = tuple(
-                failure_event.occurred_at + timedelta(hours=h) for h in combo
-            )
+            timestamps: list[datetime] = []
+            prev_actual = failure_event.occurred_at
+            for h in combo:
+                raw_ts = failure_event.occurred_at + timedelta(hours=h)
+                # Keep ordering valid even if an earlier step's shift pushed
+                # it past a later step's raw (unshifted) anchor.
+                candidate_ts = max(raw_ts, prev_actual + timedelta(minutes=1))
+                actual_ts = next_non_peak_window_start(candidate_ts, mandate.rail)
+                timestamps.append(actual_ts)
+                prev_actual = actual_ts
+            timestamps = tuple(timestamps)
 
             prev_at = failure_event.occurred_at
             reasons: list[str] = []
@@ -378,13 +402,22 @@ def plan_retries(
             commit=commit,
         )
 
+    actual_offsets_hours = tuple(
+        round((ts - failure_event.occurred_at).total_seconds() / 3600, 2) for ts in best.timestamps
+    )
+    shift_note = (
+        " (shifted from the profile's raw offsets "
+        f"{best.offsets_hours}h to avoid a peak window)"
+        if actual_offsets_hours != best.offsets_hours
+        else ""
+    )
     plan = RetryPlan(
         failure_event_id=failure_event.id,
         classification_id=classification.id,
         decision=PlanDecision.retry,
         reasoning=(
             f"Selected {len(best.offsets_hours)}-step {profile.name} sequence "
-            f"(offsets={best.offsets_hours}h) with expected value "
+            f"(offsets={actual_offsets_hours}h{shift_note}) with expected value "
             f"{best.expected_value:.2f} paise, out of {len(candidates)} valid "
             f"candidate sequences evaluated. {profile.rationale}"
         ),
