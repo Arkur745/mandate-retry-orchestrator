@@ -83,3 +83,17 @@ Chronological log of bugs found, failure modes triggered, and fixes made - writt
 Per the Day 9 Part B investigation and the user's decision: `app/simulator.py`'s P3 variants now carry per-variant `ground_truth_recoverable` (two explicit-"Suspected Fraud" variants → `False`, the generic-risk-hold variant → `True`) instead of a uniform `True`. Full rationale and the revision note are in `docs/failure_taxonomy.md`. No classifier or prompt code touched.
 
 **Re-ran classification on a fresh 30-event P3 batch against the real Groq API** (ground truth now 6 True / 24 False, matching the ~1:2 variant weighting): **26/26 scored agreement = 100.0%** (4/30 hit the S1 fallback path — unscored, consistent with the known Groq `max_tokens`-exhaustion failure mode seen on Day 3/7, not a new issue). Up from the pre-fix 15.8% (3/19).
+
+---
+
+## 2026-08-24 (Day 10) — Reclaim mechanism for rows stuck in `executing` (closes the Day 9 Part C finding)
+
+`app/models.py`'s `RetryAttempt` gets a new `claimed_at` column, stamped atomically by the (refactored-out) `_claim_row` helper when a row transitions `pending` → `executing`. `app.executor.reclaim_stuck_executing_rows(db, timeout=RECLAIM_TIMEOUT_DEFAULT=5min, clock)` atomically resets rows stuck in `executing` past that timeout back to `pending`, logging `stuck_execution_reclaimed` to `audit_log`.
+
+**Goes through the same atomic-conditional-UPDATE pattern as the original S4 claim** (`WHERE outcome='executing' AND claimed_at < cutoff`, re-evaluated by SQLite at write time) rather than a naive unconditional UPDATE — otherwise this would reintroduce exactly the race S4 exists to prevent, just pointed the other direction.
+
+**Wired as a recurring APScheduler job** on `RetryScheduler` (default: every 60 real seconds), not a one-off startup check or something `run_pipeline.py` has to remember to call. Reasoning: a stuck-executing row is a *runtime* hazard — the claimer can crash at any point while the service is live, not just between restarts — so it should self-heal continuously the same way S4's concurrency protection is always active, not invoked on demand.
+
+**Known, accepted residual edge case, not solved here:** if the original claimer isn't actually dead but is just running unusually slowly past the timeout, a reclaim can fire while it's still working, and a second caller could then execute the same row concurrently. Closing this fully would mean making `claim_and_execute`'s own completion write conditional too (a CAS-style check that it still owns the row before writing the final outcome) — a larger change than this mechanism, and not what was asked for. `RECLAIM_TIMEOUT_DEFAULT` (5 minutes, versus a real Razorpay call + backoff completing in well under a minute even worst-case) is set with a wide margin specifically to make this rare in practice.
+
+**Test reproduces the actual Day 9 Part C scenario**, not a shortcut: `tests/test_executor.py::TestReclaimStuckExecutingRows::test_reclaim_picks_up_a_row_stuck_from_a_simulated_crash` calls `_claim_row` directly (the real production claim step) and then simply stops — no call to `claim_and_execute`'s later steps, no mocked exception, nothing — simulating the process dying immediately after claiming. Confirms the reclaim job picks it up after the timeout and a fresh `claim_and_execute` call then succeeds. Two more tests confirm reclaim leaves still-in-timeout and non-`executing` rows untouched.

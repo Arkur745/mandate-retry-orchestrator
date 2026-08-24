@@ -166,6 +166,13 @@ class RetryAttempt(Base):
     attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
     scheduled_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     executed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(
+        DateTime,
+        nullable=True,
+        comment="Set atomically when outcome transitions pending->executing (app.executor's "
+        "_claim_row). Used by app.executor.reclaim_stuck_executing_rows (Day 10) to find rows "
+        "stuck in executing past a timeout; cleared when reclaimed back to pending.",
+    )
     outcome: Mapped[RetryOutcome] = mapped_column(
         Enum(RetryOutcome, name="retry_outcome_enum"),
         nullable=False,

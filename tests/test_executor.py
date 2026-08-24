@@ -17,9 +17,11 @@ from app.executor import (
     Clock,
     RetryScheduler,
     _call_with_backoff,
+    _claim_row,
     _TransientAPIError,
     claim_and_execute,
     idempotency_key_for,
+    reclaim_stuck_executing_rows,
     schedule_retry_plan,
 )
 from app.models import (
@@ -489,3 +491,97 @@ def test_audit_log_write_failure_leaves_no_misleading_audit_trail(tmp_path):
 
     db.rollback()
     assert db.query(AuditLog).count() == 0
+
+
+# ---- Day 10: reclaim mechanism for rows stuck in 'executing' ----
+#
+# Reproduces the exact scenario from Day 9 Part C's finding: a claim
+# succeeds (pending -> executing, claimed_at stamped) and then the
+# process is gone before anything else happens -- no audit write, no
+# outcome update, nothing. This calls _claim_row directly and then
+# simply stops, rather than calling claim_and_execute and mocking some
+# later step to raise -- that would test a *handled* failure inside a
+# still-running call (already covered by the S9 tests), not an actual
+# abandoned/crashed claim, which is what the reclaim mechanism exists for.
+
+
+class TestReclaimStuckExecutingRows:
+    def test_reclaim_picks_up_a_row_stuck_from_a_simulated_crash(self, db: Session):
+        mandate, plan = make_planned_retry(db)
+        rows = schedule_retry_plan(db, plan)
+        row_id = rows[0].id
+
+        crash_time = Clock(scale=1.0)
+        claimed = _claim_row(db, row_id, clock=crash_time)
+        assert claimed is True
+        # Simulate a crash here: the process dies before claim_and_execute
+        # does anything else -- no call to Razorpay, no audit_log write,
+        # no outcome update. Nothing further runs.
+
+        stuck_row = db.get(RetryAttempt, row_id)
+        assert stuck_row.outcome == RetryOutcome.executing
+        assert stuck_row.claimed_at is not None
+
+        # Time passes -- well past the reclaim timeout.
+        later_clock = Clock(scale=1.0, sim_epoch=crash_time.now() + timedelta(minutes=10))
+        reclaimed_ids = reclaim_stuck_executing_rows(
+            db, timeout=timedelta(minutes=5), clock=later_clock
+        )
+
+        assert row_id in reclaimed_ids
+        db.expire_all()
+        reclaimed_row = db.get(RetryAttempt, row_id)
+        assert reclaimed_row.outcome == RetryOutcome.pending
+        assert reclaimed_row.claimed_at is None
+
+        reclaim_logs = db.query(AuditLog).filter_by(
+            event_type="stuck_execution_reclaimed", related_entity_id=row_id
+        ).all()
+        assert len(reclaim_logs) == 1
+
+        # "Executes successfully on the next pass": a fresh claim_and_execute
+        # call now succeeds, using the real production entry point, not a
+        # test-only shortcut.
+        mandate_fresh = db.get(Mandate, mandate.id)
+        result = claim_and_execute(db, row_id, mandate_fresh, clock=later_clock)
+        assert result.outcome == RetryOutcome.success
+
+    def test_reclaim_does_not_touch_a_row_still_within_timeout(self, db: Session):
+        mandate, plan = make_planned_retry(db)
+        rows = schedule_retry_plan(db, plan)
+        row_id = rows[0].id
+
+        now = Clock(scale=1.0)
+        assert _claim_row(db, row_id, clock=now) is True
+
+        # Only 1 minute has passed -- well inside a 5-minute timeout, so
+        # this row is presumed still legitimately in flight, not crashed.
+        soon_clock = Clock(scale=1.0, sim_epoch=now.now() + timedelta(minutes=1))
+        reclaimed_ids = reclaim_stuck_executing_rows(
+            db, timeout=timedelta(minutes=5), clock=soon_clock
+        )
+
+        assert row_id not in reclaimed_ids
+        db.expire_all()
+        row = db.get(RetryAttempt, row_id)
+        assert row.outcome == RetryOutcome.executing
+
+    def test_reclaim_ignores_pending_and_terminal_rows(self, db: Session):
+        mandate, plan = make_planned_retry(db)
+        rows = schedule_retry_plan(db, plan)  # all still 'pending', never claimed
+
+        far_future = Clock(scale=1.0, sim_epoch=OCCURRED_AT + timedelta(days=1))
+        reclaimed_ids = reclaim_stuck_executing_rows(
+            db, timeout=timedelta(minutes=5), clock=far_future
+        )
+        assert reclaimed_ids == []
+
+        mandate_fresh = db.get(Mandate, mandate.id)
+        result = claim_and_execute(db, rows[0].id, mandate_fresh, clock=far_future)
+        assert result.outcome == RetryOutcome.success
+
+        # A second reclaim pass must not touch the now-terminal row either.
+        reclaimed_again = reclaim_stuck_executing_rows(
+            db, timeout=timedelta(minutes=5), clock=far_future
+        )
+        assert result.id not in reclaimed_again

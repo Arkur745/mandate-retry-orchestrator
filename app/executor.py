@@ -64,6 +64,14 @@ MAX_API_RETRIES = 3
 # an oversight.
 BASE_BACKOFF_SECONDS = 0.5
 
+# S4/S9 reclaim (Day 10): a real Razorpay call plus MAX_API_RETRIES backoff
+# attempts should complete in well under a minute even in the worst case
+# (backoff delays here are seconds, not the 168h scale of mandate-level
+# retries) -- 5 minutes is a generous margin, not a tight one, chosen to
+# minimize the (small, documented) risk of reclaiming a row that's still
+# genuinely in flight rather than actually crashed/abandoned.
+RECLAIM_TIMEOUT_DEFAULT = timedelta(minutes=5)
+
 
 def idempotency_key_for(mandate_id: int, failure_event_id: int, attempt_number: int) -> str:
     """Deterministic, not random -- this IS the S3 guard. Two calls for the
@@ -232,6 +240,23 @@ def schedule_retry_plan(db: Session, retry_plan: RetryPlan) -> list[RetryAttempt
     return rows
 
 
+def _claim_row(db: Session, retry_attempt_id: int, *, clock: Clock) -> bool:
+    """S4: atomically claim the row (pending -> executing), stamping
+    claimed_at. Returns True if this call won the claim, False if the row
+    wasn't 'pending' (already claimed or terminal). Extracted as its own
+    function so both claim_and_execute() and tests can drive just the
+    claim step in isolation -- e.g. to simulate "claimed, then the process
+    died before doing anything else" for the Day 10 reclaim mechanism's
+    tests, without faking it via a mocked exception."""
+    claim = db.execute(
+        update(RetryAttempt)
+        .where(RetryAttempt.id == retry_attempt_id, RetryAttempt.outcome == RetryOutcome.pending)
+        .values(outcome=RetryOutcome.executing, claimed_at=clock.now())
+    )
+    db.commit()
+    return claim.rowcount == 1
+
+
 def claim_and_execute(
     db: Session,
     retry_attempt_id: int,
@@ -243,19 +268,12 @@ def claim_and_execute(
     sleep_fn: Callable[[float], None] = time.sleep,
     rng: random.Random | None = None,
 ) -> RetryAttempt:
-    """S4: atomically claim the row (pending -> executing) before doing
-    any work. If the claim fails (rowcount 0), someone else already has
-    it -- log a no-op and return, never execute twice."""
+    """S4: claim the row (pending -> executing) before doing any work. If
+    the claim fails, someone else already has it -- log a no-op and
+    return, never execute twice."""
     clock = clock or default_clock()
 
-    claim = db.execute(
-        update(RetryAttempt)
-        .where(RetryAttempt.id == retry_attempt_id, RetryAttempt.outcome == RetryOutcome.pending)
-        .values(outcome=RetryOutcome.executing)
-    )
-    db.commit()
-
-    if claim.rowcount == 0:
+    if not _claim_row(db, retry_attempt_id, clock=clock):
         row = db.get(RetryAttempt, retry_attempt_id)
         db.add(
             AuditLog(
@@ -309,6 +327,69 @@ def claim_and_execute(
     return row
 
 
+def reclaim_stuck_executing_rows(
+    db: Session,
+    *,
+    timeout: timedelta = RECLAIM_TIMEOUT_DEFAULT,
+    clock: Clock | None = None,
+) -> list[int]:
+    """Finds retry_attempts rows stuck in 'executing' past `timeout` (the
+    claimer crashed, or the process was killed, before it could finish and
+    write an outcome + audit_log row -- see docs/eval_audit.md, Day 9 Part
+    C) and resets them to 'pending' so a later pass can execute them.
+
+    Goes through the SAME atomic-conditional-UPDATE pattern as the
+    original claim (_claim_row) -- a naive unconditional UPDATE here would
+    reintroduce exactly the S4 race that pattern exists to prevent: two
+    reclaim passes (or a reclaim racing a legitimately-still-running
+    claim) could otherwise both believe they alone reset a row. The WHERE
+    clause (outcome='executing' AND claimed_at < cutoff) is re-evaluated
+    atomically at write time by SQLite's serialized-writer guarantee, so
+    only rows still matching both conditions at the moment of the UPDATE
+    are affected -- identical reasoning to _claim_row's pending->executing
+    transition, just pointed the other direction (executing->pending).
+
+    Known, accepted residual edge case (not solved here -- would require
+    making claim_and_execute's own completion write conditional too,
+    which is a larger change than this reclaim mechanism): if the
+    original claimer is not actually dead but is just running unusually
+    slowly past `timeout`, a reclaim can fire while it's still working,
+    and a second caller could then claim and execute the same row
+    concurrently with the original. RECLAIM_TIMEOUT_DEFAULT is set with a
+    wide margin specifically to make this rare in practice, not to make
+    it impossible in theory.
+    """
+    clock = clock or default_clock()
+    cutoff = clock.now() - timeout
+
+    result = db.execute(
+        update(RetryAttempt)
+        .where(RetryAttempt.outcome == RetryOutcome.executing, RetryAttempt.claimed_at < cutoff)
+        .values(outcome=RetryOutcome.pending, claimed_at=None)
+        .returning(RetryAttempt.id)
+    )
+    reclaimed_ids = [row[0] for row in result]
+    db.commit()
+
+    for row_id in reclaimed_ids:
+        db.add(
+            AuditLog(
+                related_entity_type="retry_attempt",
+                related_entity_id=row_id,
+                event_type="stuck_execution_reclaimed",
+                detail={
+                    "timeout_seconds": timeout.total_seconds(),
+                    "reason": "row was in 'executing' with claimed_at older than the reclaim "
+                    "timeout -- assumed abandoned (crashed claimer), reset to pending",
+                },
+            )
+        )
+    if reclaimed_ids:
+        db.commit()
+
+    return reclaimed_ids
+
+
 class RetryScheduler:
     """Wraps APScheduler to actually fire each retry_attempts row at its
     scheduled_at, translated through `clock` into a real wall-clock
@@ -317,6 +398,14 @@ class RetryScheduler:
     place that translation happens, so the job that fires and the work it
     does (claim_and_execute) are identical at any time scale. There is no
     parallel "demo mode" executor.
+
+    Also runs reclaim_stuck_executing_rows as a recurring background job
+    (Day 10) -- chosen over a one-off startup check or leaving it to
+    run_pipeline.py because a stuck-executing row is a *runtime* hazard
+    (the claimer that owned it can crash at any point while the service is
+    live, not just between process restarts) and should self-heal
+    continuously in a running service, the same way S4's concurrency
+    protection is always active rather than something invoked on demand.
     """
 
     def __init__(
@@ -325,17 +414,35 @@ class RetryScheduler:
         *,
         clock: Clock | None = None,
         razorpay_client=None,
+        reclaim_timeout: timedelta = RECLAIM_TIMEOUT_DEFAULT,
+        reclaim_interval_seconds: float = 60.0,
     ):
         self.session_factory = session_factory
         self.clock = clock or default_clock()
         self.razorpay_client = razorpay_client
+        self.reclaim_timeout = reclaim_timeout
+        self.reclaim_interval_seconds = reclaim_interval_seconds
         self._scheduler = BackgroundScheduler(timezone="UTC")
 
     def start(self) -> None:
         self._scheduler.start()
+        self._scheduler.add_job(
+            self._run_reclaim,
+            trigger="interval",
+            seconds=self.reclaim_interval_seconds,
+            id="reclaim-stuck-executing",
+            replace_existing=True,
+        )
 
     def shutdown(self, wait: bool = True) -> None:
         self._scheduler.shutdown(wait=wait)
+
+    def _run_reclaim(self) -> None:
+        db = self.session_factory()
+        try:
+            reclaim_stuck_executing_rows(db, timeout=self.reclaim_timeout, clock=self.clock)
+        finally:
+            db.close()
 
     def schedule_attempt(self, retry_attempt: RetryAttempt, mandate_id: int) -> str:
         """Schedule one retry_attempts row to execute at its scheduled_at,
