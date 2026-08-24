@@ -194,6 +194,7 @@ def build_mandate_trace(db: Session, mandate: Mandate) -> list[TraceEntry]:
                 label=f"Failure: {event.taxonomy_id}",
                 is_llm=False,
                 detail={
+                    "id": event.id,
                     "taxonomy_id": event.taxonomy_id,
                     "raw_reason_text": event.raw_reason_text,
                     "ground_truth_recoverable": event.ground_truth_recoverable,

@@ -137,6 +137,37 @@
   .summary-item { font-size: 12.5px; color: var(--text-dim); font-family: var(--mono); }
   #empty-state { color: var(--text-dim); padding: 60px 0; text-align: center; }
 
+  #simulate-panel {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    margin-bottom: 24px; padding: 10px 12px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+  }
+  .simulate-label { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-dim); margin-right: 4px; }
+  #sim-taxonomy {
+    background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+    padding: 6px 8px; border-radius: 6px; font-size: 13px; max-width: 360px;
+  }
+  #sim-run {
+    background: var(--accent); color: #06121f; border: none; font-weight: 700;
+    padding: 6px 16px; border-radius: 6px; font-size: 13px; cursor: pointer;
+  }
+  #sim-run:hover { filter: brightness(1.1); }
+  #sim-run:disabled { opacity: 0.6; cursor: default; filter: none; }
+  #sim-status { font-size: 12.5px; color: var(--text-dim); font-family: var(--mono); }
+
+  .live-run-banner {
+    display: flex; align-items: center; gap: 8px;
+    margin: 4px 0 6px 0; padding: 8px 12px;
+    background: color-mix(in srgb, var(--accent) 16%, var(--panel));
+    border: 1px solid var(--accent); border-radius: 8px;
+    font-size: 12.5px; font-weight: 700; color: var(--text);
+  }
+  .live-run-banner .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--accent); animation: pulse-ring 1.4s ease-in-out infinite; flex: none; }
+  .live-run-banner.stale {
+    background: var(--panel-2); border-color: var(--border); color: var(--text-dim); font-weight: 600;
+  }
+  .live-run-banner.stale .dot { background: var(--text-dim); animation: none; }
+
   .timeline { position: relative; padding-left: 44px; }
   .timeline::before {
     content: "";
@@ -296,6 +327,12 @@
     <h2 id="main-title"></h2>
     <div class="sub" id="main-sub"></div>
     <div id="main-summary"></div>
+    <div id="simulate-panel">
+      <span class="simulate-label">Simulate a failure</span>
+      <select id="sim-taxonomy" aria-label="Failure category to simulate"></select>
+      <button id="sim-run" type="button">Run</button>
+      <span id="sim-status" aria-live="polite"></span>
+    </div>
   </div>
   <div class="timeline" id="timeline" style="display:none"></div>
 </div>
@@ -548,7 +585,16 @@ async function selectMandate(id) {
   const mandate = await findMandate(id);
   const res = await fetch(`/mandates/${id}/trace`);
   const entries = await res.json();
+  renderTrace(mandate, entries);
+  loadSimulateOptions(id);
+}
 
+// Shared by selectMandate (fetches the trace) and the simulate "Run"
+// handler (already has the trace from the POST response) -- one render
+// path, so a live simulated run looks exactly like the same mandate
+// reloaded normally, except for the live-run banner.
+function renderTrace(mandate, entries) {
+  const id = mandate ? mandate.id : selectedId;
   document.getElementById('empty-state').style.display = 'none';
   document.getElementById('main-header').style.display = '';
   document.getElementById('timeline').style.display = '';
@@ -570,10 +616,95 @@ async function selectMandate(id) {
     timeline.innerHTML = '<div style="color:var(--text-dim)">No failure events recorded for this mandate yet.</div>';
     return;
   }
+
+  // A failure_event is "live" if the simulate endpoint tagged it via an
+  // audit_log marker (see app/routers/mandates.py's simulate_failure).
+  // Only the most recently occurring one gets the prominent banner --
+  // older simulated runs, from earlier retakes, read as ordinary history.
+  const liveIds = new Set(
+    entries
+      .filter(e => e.entry_type === 'audit_log' && e.detail.event_type === 'live_simulation_triggered')
+      .map(e => e.detail.related_entity_id)
+  );
+  const failureEventIds = entries.filter(e => e.entry_type === 'failure_event').map(e => e.detail.id);
+  const mostRecentFailureEventId = failureEventIds[failureEventIds.length - 1];
+
   entries.forEach((e, i) => {
+    if (e.entry_type === 'failure_event' && liveIds.has(e.detail.id)) {
+      const isMostRecent = e.detail.id === mostRecentFailureEventId;
+      const banner = document.createElement('div');
+      banner.className = 'live-run-banner' + (isMostRecent ? '' : ' stale');
+      banner.innerHTML = isMostRecent
+        ? '<span class="dot"></span> LIVE SIMULATED RUN — triggered just now from this page'
+        : '<span class="dot"></span> Previously simulated run (not the current one)';
+      timeline.appendChild(banner);
+    }
     timeline.appendChild(renderEntry(e, i === entries.length - 1));
   });
 }
+
+async function loadSimulateOptions(mandateId) {
+  const select = document.getElementById('sim-taxonomy');
+  select.innerHTML = '<option>Loading…</option>';
+  const res = await fetch(`/mandates/${mandateId}/simulate-failure/options`);
+  const options = await res.json();
+  select.innerHTML = '';
+  for (const opt of options) {
+    const el = document.createElement('option');
+    el.value = opt.id;
+    el.textContent = `${opt.id} — ${opt.description}`;
+    select.appendChild(el);
+  }
+}
+
+const SIM_STAGES = ['Injecting failure…', 'Classifying…', 'Planning…', 'Executing / escalating…'];
+
+async function runSimulation() {
+  if (!selectedId) return;
+  const taxonomyId = document.getElementById('sim-taxonomy').value;
+  if (!taxonomyId) return;
+
+  const runBtn = document.getElementById('sim-run');
+  const select = document.getElementById('sim-taxonomy');
+  const status = document.getElementById('sim-status');
+  runBtn.disabled = true;
+  select.disabled = true;
+
+  let stage = 0;
+  status.textContent = SIM_STAGES[0];
+  const stageTimer = setInterval(() => {
+    stage = Math.min(stage + 1, SIM_STAGES.length - 1);
+    status.textContent = SIM_STAGES[stage];
+  }, 550);
+
+  try {
+    const res = await fetch(`/mandates/${selectedId}/simulate-failure`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ taxonomy_id: taxonomyId }),
+    });
+    clearInterval(stageTimer);
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      status.textContent = 'Error: ' + (body.detail || res.statusText);
+      return;
+    }
+    const entries = await res.json();
+    status.textContent = 'Done.';
+    const mandate = await findMandate(selectedId);
+    renderTrace(mandate, entries);
+    fetchMandates(); // refresh sidebar counts/filters in the background
+    setTimeout(() => { if (status.textContent === 'Done.') status.textContent = ''; }, 4000);
+  } catch (err) {
+    clearInterval(stageTimer);
+    status.textContent = 'Error: ' + String(err);
+  } finally {
+    runBtn.disabled = false;
+    select.disabled = false;
+  }
+}
+
+document.getElementById('sim-run').addEventListener('click', runSimulation);
 
 function tooltipBadge(cls, label, tooltipKey) {
   return `<span class="badge ${cls} tooltip-target" tabindex="0" data-tooltip-key="${tooltipKey}">${escapeHtml(label)}</span>`;
