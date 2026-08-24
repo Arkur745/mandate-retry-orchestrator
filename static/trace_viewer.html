@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mandate Retry Orchestrator — Trace Viewer</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #0f1216;
+    --panel: #171b21;
+    --panel-2: #1d222a;
+    --border: #2a2f38;
+    --text: #e6e9ef;
+    --text-dim: #9399a6;
+    --accent: #4f8cff;
+    --llm: #b06bff;
+    --llm-bg: #241a33;
+    --rule: #58a6ff;
+    --good: #3fb950;
+    --bad: #f85149;
+    --warn: #d29922;
+    --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    display: flex;
+    height: 100vh;
+    overflow: hidden;
+  }
+  #sidebar {
+    width: 340px;
+    min-width: 340px;
+    border-right: 1px solid var(--border);
+    background: var(--panel);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  #sidebar h1 {
+    font-size: 15px;
+    margin: 0;
+    padding: 14px 16px 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  #sidebar h1 span { color: var(--text-dim); font-weight: 400; display: block; font-size: 11px; margin-top: 2px; }
+  #controls { padding: 10px 14px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; }
+  #controls input, #controls select {
+    width: 100%;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 8px;
+    border-radius: 6px;
+    font-size: 13px;
+  }
+  #controls label { font-size: 11px; color: var(--text-dim); display: flex; align-items: center; gap: 6px; }
+  #mandate-list { flex: 1; overflow-y: auto; }
+  .mandate-item {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    font-size: 13px;
+  }
+  .mandate-item:hover { background: var(--panel-2); }
+  .mandate-item.selected { background: #1c2740; border-left: 3px solid var(--accent); }
+  .mandate-item .mid { font-family: var(--mono); color: var(--accent); font-weight: 600; }
+  .mandate-item .meta { color: var(--text-dim); font-size: 11px; margin-top: 2px; }
+  #main { flex: 1; overflow-y: auto; padding: 24px 32px; }
+  #main-header { margin-bottom: 20px; }
+  #main-header h2 { margin: 0 0 4px; font-size: 18px; }
+  #main-header .sub { color: var(--text-dim); font-size: 13px; font-family: var(--mono); }
+  #empty-state { color: var(--text-dim); padding: 60px 0; text-align: center; }
+  .timeline { position: relative; padding-left: 28px; }
+  .timeline::before {
+    content: "";
+    position: absolute; left: 8px; top: 6px; bottom: 6px; width: 2px;
+    background: var(--border);
+  }
+  .entry {
+    position: relative;
+    margin-bottom: 14px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+  }
+  .entry::before {
+    content: "";
+    position: absolute; left: -24px; top: 16px;
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--border);
+    border: 2px solid var(--bg);
+  }
+  .entry.llm { border-color: var(--llm); background: var(--llm-bg); }
+  .entry.llm::before { background: var(--llm); }
+  .entry.rule::before { background: var(--rule); }
+  .entry-top { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+  .entry-label { font-weight: 600; font-size: 14px; }
+  .entry-time { font-family: var(--mono); font-size: 11px; color: var(--text-dim); white-space: nowrap; }
+  .badge {
+    display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: 0.03em;
+    padding: 2px 6px; border-radius: 4px; margin-left: 8px; vertical-align: middle;
+    text-transform: uppercase;
+  }
+  .badge.llm { background: var(--llm); color: #fff; }
+  .badge.rule { background: var(--rule); color: #06121f; }
+  .reasoning {
+    margin-top: 8px;
+    padding: 8px 10px;
+    background: rgba(176, 107, 255, 0.08);
+    border-left: 3px solid var(--llm);
+    border-radius: 4px;
+    font-size: 13px;
+    font-style: italic;
+    color: var(--text);
+  }
+  .detail-grid { margin-top: 8px; font-size: 12px; color: var(--text-dim); display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; }
+  .detail-grid .k { color: var(--text-dim); }
+  .detail-grid .v { color: var(--text); font-family: var(--mono); }
+  .steps-table { margin-top: 8px; width: 100%; border-collapse: collapse; font-size: 12px; }
+  .steps-table th, .steps-table td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); }
+  .steps-table th { color: var(--text-dim); font-weight: 500; }
+  .outcome { font-weight: 600; }
+  .outcome.success { color: var(--good); }
+  .outcome.failed { color: var(--bad); }
+  .outcome.pending, .outcome.executing { color: var(--warn); }
+  .content-box { margin-top: 8px; padding: 8px 10px; background: var(--panel-2); border-radius: 4px; font-size: 13px; white-space: pre-wrap; }
+  .type-tag { font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+
+<div id="sidebar">
+  <h1>Mandate Retry Orchestrator<span>Trace viewer — read only</span></h1>
+  <div id="controls">
+    <input id="search" type="text" placeholder="Search id / customer_ref / rail...">
+    <select id="escalation-filter">
+      <option value="">All mandates</option>
+      <option value="has:true">Has escalation</option>
+      <option value="has:false">No escalation</option>
+      <option value="type:retry_exhausted_nudge">Escalation: retry_exhausted_nudge</option>
+      <option value="type:reauth_needed">Escalation: reauth_needed</option>
+      <option value="type:rail_switch_recommended">Escalation: rail_switch_recommended</option>
+      <option value="type:merchant_escalation">Escalation: merchant_escalation</option>
+    </select>
+  </div>
+  <div id="mandate-list"></div>
+</div>
+
+<div id="main">
+  <div id="empty-state">Select a mandate on the left to view its trace.</div>
+  <div id="main-header" style="display:none">
+    <h2 id="main-title"></h2>
+    <div class="sub" id="main-sub"></div>
+  </div>
+  <div class="timeline" id="timeline" style="display:none"></div>
+</div>
+
+<script>
+let allMandates = [];
+let selectedId = null;
+
+async function fetchMandates() {
+  const filter = document.getElementById('escalation-filter').value;
+  const params = new URLSearchParams();
+  if (filter.startsWith('has:')) params.set('has_escalation', filter.slice(4));
+  if (filter.startsWith('type:')) params.set('escalation_type', filter.slice(5));
+  const res = await fetch('/mandates?' + params.toString());
+  allMandates = await res.json();
+  renderMandateList();
+}
+
+function renderMandateList() {
+  const q = document.getElementById('search').value.trim().toLowerCase();
+  const list = document.getElementById('mandate-list');
+  list.innerHTML = '';
+  const filtered = allMandates.filter(m =>
+    !q || String(m.id).includes(q) || m.customer_ref.toLowerCase().includes(q) || m.rail.toLowerCase().includes(q)
+  );
+  if (filtered.length === 0) {
+    list.innerHTML = '<div class="mandate-item" style="color:var(--text-dim)">No mandates match.</div>';
+    return;
+  }
+  for (const m of filtered) {
+    const div = document.createElement('div');
+    div.className = 'mandate-item' + (m.id === selectedId ? ' selected' : '');
+    div.innerHTML = `<span class="mid">#${m.id}</span> &nbsp; ${m.customer_ref}
+      <div class="meta">${m.rail} · INR ${(m.amount / 100).toFixed(2)} · ${m.status}</div>`;
+    div.onclick = () => selectMandate(m.id);
+    list.appendChild(div);
+  }
+}
+
+async function selectMandate(id) {
+  selectedId = id;
+  renderMandateList();
+  const mandate = allMandates.find(m => m.id === id);
+  const res = await fetch(`/mandates/${id}/trace`);
+  const entries = await res.json();
+
+  document.getElementById('empty-state').style.display = 'none';
+  document.getElementById('main-header').style.display = '';
+  document.getElementById('timeline').style.display = '';
+  document.getElementById('main-title').textContent = `Mandate #${id} — ${mandate ? mandate.customer_ref : ''}`;
+  document.getElementById('main-sub').textContent = mandate
+    ? `${mandate.rail} · INR ${(mandate.amount / 100).toFixed(2)} · expires ${mandate.mandate_expiry}`
+    : '';
+
+  const timeline = document.getElementById('timeline');
+  timeline.innerHTML = '';
+  if (entries.length === 0) {
+    timeline.innerHTML = '<div style="color:var(--text-dim)">No failure events recorded for this mandate yet.</div>';
+    return;
+  }
+  for (const e of entries) {
+    timeline.appendChild(renderEntry(e));
+  }
+}
+
+function renderEntry(e) {
+  const div = document.createElement('div');
+  const llmClass = e.is_llm ? 'llm' : (e.entry_type === 'classification' ? 'rule' : '');
+  div.className = 'entry ' + llmClass;
+
+  let badge = '';
+  if (e.entry_type === 'classification' || e.entry_type === 'fallback_message') {
+    badge = e.is_llm ? '<span class="badge llm">LLM</span>' : '<span class="badge rule">RULE</span>';
+  }
+
+  let body = `
+    <div class="type-tag">${e.entry_type.replace('_', ' ')}</div>
+    <div class="entry-top">
+      <div class="entry-label">${escapeHtml(e.label)}${badge}</div>
+      <div class="entry-time">${e.timestamp.replace('T', ' ')}</div>
+    </div>`;
+
+  const d = e.detail || {};
+
+  if (e.entry_type === 'failure_event') {
+    body += `<div class="content-box">${escapeHtml(d.raw_reason_text)}</div>`;
+    body += `<div class="detail-grid">
+      <div class="k">ground_truth_recoverable</div><div class="v">${d.ground_truth_recoverable}</div>
+    </div>`;
+  } else if (e.entry_type === 'classification') {
+    if (d.reasoning) body += `<div class="reasoning">${escapeHtml(d.reasoning)}</div>`;
+    body += `<div class="detail-grid">
+      <div class="k">confidence</div><div class="v">${d.confidence ?? 'n/a'}</div>
+    </div>`;
+  } else if (e.entry_type === 'plan') {
+    body += `<div class="content-box">${escapeHtml(d.reasoning)}</div>`;
+    if (d.steps && d.steps.length) {
+      body += `<table class="steps-table"><tr><th>#</th><th>proposed_at</th><th>p(success)</th><th>cost (paise)</th></tr>`;
+      for (const s of d.steps) {
+        body += `<tr><td>${s.attempt_number}</td><td>${s.proposed_timestamp.replace('T', ' ')}</td><td>${s.success_probability.toFixed(2)}</td><td>${s.cost.toFixed(0)}</td></tr>`;
+      }
+      body += `</table>`;
+    }
+    if (d.expected_value !== null && d.expected_value !== undefined) {
+      body += `<div class="detail-grid"><div class="k">expected_value</div><div class="v">${d.expected_value.toFixed(2)} paise</div></div>`;
+    }
+  } else if (e.entry_type === 'retry_attempt') {
+    body += `<div class="detail-grid">
+      <div class="k">outcome</div><div class="v outcome ${d.outcome}">${d.outcome}</div>
+      <div class="k">scheduled_at</div><div class="v">${d.scheduled_at}</div>
+      <div class="k">executed_at</div><div class="v">${d.executed_at ?? '—'}</div>
+    </div>`;
+  } else if (e.entry_type === 'fallback_message') {
+    body += `<div class="content-box">${escapeHtml(d.content)}</div>`;
+    body += `<div class="detail-grid">
+      <div class="k">validation_passed</div><div class="v">${d.validation_passed}</div>
+      ${d.validation_detail ? `<div class="k">validation_detail</div><div class="v">${escapeHtml(d.validation_detail)}</div>` : ''}
+    </div>`;
+  } else if (e.entry_type === 'audit_log') {
+    body += `<div class="detail-grid">
+      <div class="k">event_type</div><div class="v">${d.event_type}</div>
+    </div>`;
+    if (d.detail) body += `<div class="content-box" style="font-size:11px">${escapeHtml(JSON.stringify(d.detail))}</div>`;
+  }
+
+  div.innerHTML = body;
+  return div;
+}
+
+function escapeHtml(s) {
+  if (s === null || s === undefined) return '';
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+document.getElementById('search').addEventListener('input', renderMandateList);
+document.getElementById('escalation-filter').addEventListener('change', fetchMandates);
+
+fetchMandates();
+</script>
+</body>
+</html>
