@@ -1,7 +1,13 @@
-"""SQLAlchemy models: mandates, failure_events, retry_attempts, audit_log.
+"""SQLAlchemy models for the full pipeline: mandates, failure_events,
+classifications, retry_plans, planned_attempts, retry_attempts,
+fallback_messages, audit_log.
 
-Day 1 scope only — no classifier/planner/executor logic lives here, just the
-schema those stages will read and write.
+Schema only — no classifier/planner/constraints/executor/fallback logic
+lives here, just the tables those stages read and write. Grew
+incrementally alongside each pipeline stage (Day 1 mandates/failure_events
+/retry_attempts/audit_log; Day 3 classifications; Day 5 retry_plans/
+planned_attempts; Day 6 RetryOutcome.executing, Mandate.razorpay_token,
+RetryAttempt.claimed_at; Day 7 fallback_messages).
 """
 from __future__ import annotations
 

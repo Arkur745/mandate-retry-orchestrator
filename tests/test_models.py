@@ -1,5 +1,5 @@
 """Model-layer tests: can a mandate + failure_event + retry_attempt be linked?"""
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import pytest
 from sqlalchemy import create_engine
