@@ -1,0 +1,110 @@
+"""Parses docs/failure_taxonomy.md and docs/demo_mandates.md at request
+time so the trace viewer's /help page and pinned demo-scenario sidebar
+can render from the source-of-truth docs instead of a hand-copied,
+driftable duplicate. Read-only, presentation plumbing only -- nothing
+here is imported by or affects the classification/planning/execution
+pipeline.
+"""
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+DOCS_DIR = Path(__file__).resolve().parent.parent / "docs"
+
+
+def parse_taxonomy_table() -> list[dict]:
+    """Parses Part 1 (payment/mandate failure taxonomy) of
+    docs/failure_taxonomy.md's markdown table into structured rows."""
+    text = (DOCS_DIR / "failure_taxonomy.md").read_text(encoding="utf-8")
+    start = text.index("## Part 1")
+    end = text.index("## Part 2")
+    section = text[start:end]
+
+    rows = []
+    for line in section.splitlines():
+        line = line.strip()
+        if not re.match(r"^\|\s*P\d+\s*\|", line):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if len(cells) < 7:
+            continue
+        rows.append(
+            {
+                "id": cells[0],
+                "rail": cells[1],
+                "failure": cells[2],
+                "nature": cells[3],
+                "recovery_window": cells[4],
+                "retry_worthy": cells[5],
+                "strategy": cells[6],
+            }
+        )
+    return rows
+
+
+# One plain-language sentence per EscalationType. There's no markdown
+# table for these in the docs to parse (architecture.md discusses them in
+# prose), so these are authored directly -- but the *set* of types is
+# exercised against app.models.EscalationType by tests, so an enum change
+# that isn't reflected here fails loudly instead of silently drifting.
+ESCALATION_TYPE_GLOSSARY: dict[str, str] = {
+    "retry_exhausted_nudge": (
+        "Every retry option was exhausted, too low-confidence, or not worth the "
+        "cost (negative expected value) -- the customer gets a direct nudge to "
+        "complete the payment themselves."
+    ),
+    "reauth_needed": (
+        "The mandate or payment method itself needs fresh action from the "
+        "customer -- an expired or revoked mandate, or an expired/blocked card "
+        "-- no retry can fix this without their input."
+    ),
+    "rail_switch_recommended": (
+        "A structural mismatch between the failure's recovery profile and the "
+        "payment rail's minimum retry spacing means no retry timing works on "
+        "this rail -- the customer is pointed at an alternative rail (typically "
+        "UPI Autopay)."
+    ),
+    "merchant_escalation": (
+        "No clean customer self-service path applies -- e.g. no timing profile "
+        "exists for this category, or a hard failure like a KYC freeze or "
+        "debit-limit breach -- so it's routed to the merchant for manual "
+        "handling."
+    ),
+}
+
+
+def parse_demo_scenarios() -> list[dict]:
+    """Parses the curated-mandate table in docs/demo_mandates.md so the
+    trace viewer's pinned sidebar section can't drift out of sync with
+    the doc that Day 12's demo script references."""
+    text = (DOCS_DIR / "demo_mandates.md").read_text(encoding="utf-8")
+    lines = text.splitlines()
+
+    rows = []
+    in_table = False
+    for line in lines:
+        s = line.strip()
+        if s.startswith("| # | Mandate ID"):
+            in_table = True
+            continue
+        if not in_table:
+            continue
+        if s.startswith("|---"):
+            continue
+        if not s.startswith("|"):
+            break
+        cells = [c.strip() for c in s.strip("|").split("|")]
+        if len(cells) < 4:
+            continue
+        digits = re.sub(r"[^\d]", "", cells[1])
+        if not digits:
+            continue
+        rows.append(
+            {
+                "mandate_id": int(digits),
+                "scenario": cells[2],
+                "camera_notes": cells[3],
+            }
+        )
+    return rows

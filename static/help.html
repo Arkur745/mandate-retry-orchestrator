@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Trace Viewer — Legend &amp; Glossary</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #0f1216;
+    --panel: #171b21;
+    --panel-2: #1d222a;
+    --border: #2a2f38;
+    --text: #e6e9ef;
+    --text-dim: #9399a6;
+    --accent: #4f8cff;
+    --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+
+    --c-failure: #d29922;
+    --c-rule: #58a6ff;
+    --c-llm: #b06bff;
+    --c-retry: #2fae82;
+    --c-escalate: #f0883e;
+    --c-success: #3fb950;
+    --c-failed: #f85149;
+    --c-noop: #8b949e;
+    --c-fallback: #39c5cf;
+  }
+  * { box-sizing: border-box; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--text);
+    min-height: 100vh;
+  }
+  a { color: var(--accent); }
+  .page { max-width: 920px; margin: 0 auto; padding: 24px 28px 60px; }
+  header { display: flex; align-items: baseline; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }
+  header h1 { font-size: 20px; margin: 0; }
+  .back { font-size: 13px; text-decoration: none; }
+  .back:hover { text-decoration: underline; }
+  section { margin-bottom: 36px; }
+  h2 { font-size: 15px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); border-bottom: 1px solid var(--border); padding-bottom: 8px; margin-bottom: 16px; }
+  .note { font-size: 12.5px; color: var(--text-dim); margin: -10px 0 16px; }
+
+  .legend-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
+  .legend-item {
+    display: flex; align-items: center; gap: 10px;
+    background: var(--panel); border: 1px solid var(--border); border-left: 4px solid var(--stage-color, var(--border));
+    border-radius: 8px; padding: 10px 12px; font-size: 13px;
+  }
+  .legend-dot { width: 14px; height: 14px; border-radius: 50%; background: var(--stage-color, var(--border)); flex: none; }
+  .legend-label { font-weight: 600; }
+  .legend-desc { color: var(--text-dim); font-size: 12px; }
+
+  .badge {
+    display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: 0.03em;
+    padding: 2px 6px; border-radius: 4px; text-transform: uppercase;
+  }
+  .badge.llm { background: var(--c-llm); color: #fff; }
+  .badge.rule { background: var(--c-rule); color: #06121f; }
+  .badge.safe-default { background: var(--c-noop); color: #111; }
+  .badge.retry { background: var(--c-retry); color: #04201a; }
+  .badge.escalate { background: var(--c-escalate); color: #2b1300; }
+  .badge.outcome-success { background: var(--c-success); color: #04210b; }
+  .badge.outcome-failed { background: var(--c-failed); color: #2b0705; }
+  .badge.outcome-noop { background: var(--c-noop); color: #111; }
+  .badge-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 10px; font-size: 13px; }
+  .badge-row .badge { margin: 0; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--text-dim); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; }
+  td.id-cell { font-family: var(--mono); color: var(--accent); font-weight: 700; white-space: nowrap; }
+  .table-wrap { overflow-x: auto; }
+
+  .esc-item {
+    background: var(--panel); border: 1px solid var(--border); border-left: 4px solid var(--c-escalate);
+    border-radius: 8px; padding: 10px 14px; margin-bottom: 10px;
+  }
+  .esc-item .esc-name { font-family: var(--mono); font-weight: 700; color: var(--text); }
+  .esc-item .esc-desc { color: var(--text-dim); font-size: 13px; margin-top: 4px; }
+
+  #loading, #error { color: var(--text-dim); font-size: 13px; }
+  #error { color: var(--c-failed); }
+</style>
+</head>
+<body>
+<div class="page">
+  <header>
+    <a class="back" href="/">&larr; Back to trace viewer</a>
+    <h1>Legend &amp; glossary</h1>
+  </header>
+
+  <section id="legend-section">
+    <h2>Stage colors &amp; icons</h2>
+    <p class="note">Every entry in a mandate's timeline is accented (left border, icon, dot) by the color for its stage below. Where a stage has more than one possible color (classification, plan, execution), the color depends on the outcome shown next to it.</p>
+    <div class="legend-grid">
+      <div class="legend-item" style="--stage-color: var(--c-failure)"><div class="legend-dot"></div><div><div class="legend-label">Failure event</div><div class="legend-desc">A mandate debit failed and was injected into the pipeline.</div></div></div>
+      <div class="legend-item" style="--stage-color: var(--c-rule)"><div class="legend-dot"></div><div><div class="legend-label">Classification — rule</div><div class="legend-desc">Classified by a deterministic taxonomy lookup, no LLM call.</div></div></div>
+      <div class="legend-item" style="--stage-color: var(--c-llm)"><div class="legend-dot"></div><div><div class="legend-label">Classification — LLM</div><div class="legend-desc">P3/P12 only: genuinely ambiguous, routed to the Groq model. Card background is tinted and reasoning is shown inline.</div></div></div>
+      <div class="legend-item" style="--stage-color: var(--c-retry)"><div class="legend-dot"></div><div><div class="legend-label">Plan — retry</div><div class="legend-desc">Planner selected a cost/probability-scored retry sequence.</div></div></div>
+      <div class="legend-item" style="--stage-color: var(--c-escalate)"><div class="legend-dot"></div><div><div class="legend-label">Plan — escalate</div><div class="legend-desc">No viable retry candidate; the plan hands off to the fallback agent.</div></div></div>
+      <div class="legend-item" style="--stage-color: var(--c-success)"><div class="legend-dot"></div><div><div class="legend-label">Execution — success</div><div class="legend-desc">A scheduled retry attempt succeeded against the (test-mode) payment API.</div></div></div>
+      <div class="legend-item" style="--stage-color: var(--c-failed)"><div class="legend-dot"></div><div><div class="legend-label">Execution — failed</div><div class="legend-desc">A scheduled retry attempt was executed and declined.</div></div></div>
+      <div class="legend-item" style="--stage-color: var(--c-noop)"><div class="legend-dot"></div><div><div class="legend-label">Execution — pending / no-op</div><div class="legend-desc">Not yet executed, or blocked as a duplicate/concurrent no-op (S3/S4).</div></div></div>
+      <div class="legend-item" style="--stage-color: var(--c-fallback)"><div class="legend-dot"></div><div><div class="legend-label">Fallback message</div><div class="legend-desc">The customer/merchant-facing message generated for an escalation.</div></div></div>
+      <div class="legend-item" style="--stage-color: var(--c-noop)"><div class="legend-dot"></div><div><div class="legend-label">Audit log</div><div class="legend-desc">A system-level event (backoff retry, reclaimed stuck row, etc.) correlated onto this mandate's timeline.</div></div></div>
+    </div>
+  </section>
+
+  <section id="badges-section">
+    <h2>Badges</h2>
+    <p class="note">Badges sit next to an entry's label and are scannable without reading the surrounding text.</p>
+    <div class="badge-row"><span class="badge rule">RULE</span> classification made by deterministic taxonomy lookup — zero LLM calls.</div>
+    <div class="badge-row"><span class="badge llm">LLM</span> classification or fallback message genuinely generated by the Groq model (reasoning/content shown inline).</div>
+    <div class="badge-row"><span class="badge safe-default">SAFE DEFAULT</span> fallback message used a fixed, hardcoded template because LLM output failed validation (S8) — never unvalidated LLM text.</div>
+    <div class="badge-row"><span class="badge retry">RETRY</span> the planner chose to attempt one or more scheduled retries.</div>
+    <div class="badge-row"><span class="badge escalate">ESCALATE</span> the planner chose not to retry and handed off to the fallback agent.</div>
+    <div class="badge-row"><span class="badge outcome-success">SUCCESS</span><span class="badge outcome-failed">FAILED</span><span class="badge outcome-noop">PENDING / SKIPPED</span> the outcome of one executed (or not-yet-executed) retry attempt.</div>
+  </section>
+
+  <section id="taxonomy-section">
+    <h2>Failure taxonomy (P1–P12)</h2>
+    <p class="note">Parsed live from <code>docs/failure_taxonomy.md</code> — this table can't drift out of sync with that doc, since it's re-read on every page load rather than duplicated here.</p>
+    <div id="taxonomy-loading">Loading…</div>
+    <div class="table-wrap"><table id="taxonomy-table" style="display:none">
+      <thead><tr><th>ID</th><th>Rail</th><th>Failure</th><th>Retry-worthy</th></tr></thead>
+      <tbody id="taxonomy-body"></tbody>
+    </table></div>
+  </section>
+
+  <section id="escalation-section">
+    <h2>Escalation types</h2>
+    <p class="note">The four possible fallback-message categories. Selection is deterministic code (not an LLM decision) — see <code>app/fallback.py</code>.</p>
+    <div id="escalation-loading">Loading…</div>
+    <div id="escalation-list"></div>
+  </section>
+</div>
+
+<script>
+async function loadGlossary() {
+  try {
+    const res = await fetch('/api/glossary');
+    const data = await res.json();
+
+    const tbody = document.getElementById('taxonomy-body');
+    tbody.innerHTML = '';
+    for (const row of data.taxonomy) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td class="id-cell">${escapeHtml(row.id)}</td><td>${escapeHtml(row.rail)}</td><td>${escapeHtml(row.failure)}</td><td>${escapeHtml(row.retry_worthy)}</td>`;
+      tbody.appendChild(tr);
+    }
+    document.getElementById('taxonomy-loading').style.display = 'none';
+    document.getElementById('taxonomy-table').style.display = '';
+
+    const escList = document.getElementById('escalation-list');
+    escList.innerHTML = '';
+    for (const [name, desc] of Object.entries(data.escalation_types)) {
+      const div = document.createElement('div');
+      div.className = 'esc-item';
+      div.innerHTML = `<div class="esc-name">${escapeHtml(name)}</div><div class="esc-desc">${escapeHtml(desc)}</div>`;
+      escList.appendChild(div);
+    }
+    document.getElementById('escalation-loading').style.display = 'none';
+  } catch (err) {
+    document.getElementById('taxonomy-loading').outerHTML = '<div id="error">Failed to load glossary: ' + escapeHtml(String(err)) + '</div>';
+  }
+}
+
+function escapeHtml(s) {
+  if (s === null || s === undefined) return '';
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+loadGlossary();
+</script>
+</body>
+</html>
