@@ -91,6 +91,24 @@ def test_p7_recoverability_is_consistent_with_chosen_variant(db: Session):
     assert seen == {True, False}
 
 
+def test_p3_recoverability_matches_variant_not_uniform(db: Session):
+    # Ground truth revised Day 10 (docs/failure_taxonomy.md revision note,
+    # docs/eval_audit.md Day 9 Part B): explicit "Suspected Fraud" variants
+    # are non-recoverable; the generic risk-hold variant remains
+    # recoverable. No longer a uniform True across all P3 variants.
+    mandate = make_mandate(db, Rail.upi_autopay)
+    rng = random.Random(4)
+    seen = set()
+    for _ in range(40):
+        event = inject_failure(db, mandate, taxonomy_id="P3", rng=rng)
+        seen.add(event.ground_truth_recoverable)
+        if "suspected fraud" in event.raw_reason_text.lower():
+            assert event.ground_truth_recoverable is False
+        else:
+            assert event.ground_truth_recoverable is True
+    assert seen == {True, False}
+
+
 def test_forcing_category_incompatible_with_rail_raises(db: Session):
     mandate = make_mandate(db, Rail.card_emandate)
     with pytest.raises(ValueError):

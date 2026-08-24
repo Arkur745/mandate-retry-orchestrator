@@ -107,17 +107,26 @@ TAXONOMY: dict[str, TaxonomyCategory] = {
         id="P3",
         rails=ALL_RAILS,
         weight=5,
+        # Ground truth revised 2026-08-24 (Day 10) -- see docs/failure_taxonomy.md's
+        # dated revision note. Was uniformly True ("cautious yes") for all
+        # three variants; a real classifier investigation (docs/eval_audit.md,
+        # Day 9 Part B) found the two explicit-fraud variants consistently
+        # and defensibly judged non-recoverable (RC=59-style "Suspected
+        # Fraud" is standard bank/network language for a hold needing
+        # human/bank-side resolution, not something a blind retry fixes),
+        # while the generic-risk-hold variant remains recoverable. Variant
+        # identity now carries the label, not the bare category code.
         variants=(
             _v(
                 "Transaction held for review by issuing bank's risk engine. "
                 "Bank response: 'Declined - Suspected Fraud, contact your "
                 "bank.'",
-                True,
+                False,
             ),
             _v(
                 "Debit blocked: issuer flagged this transaction under "
                 "velocity/risk rules. RC=59 (Suspected Fraud).",
-                True,
+                False,
             ),
             _v(
                 "Payment declined by issuer risk system. No further detail "

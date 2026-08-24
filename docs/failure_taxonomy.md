@@ -15,7 +15,7 @@ Every category below needs: a simulated trigger (for the failure simulator), a g
 |----|------|---------|--------|--------------------------|---------------|------------------------|
 | P1 | UPI Autopay / e-NACH | Insufficient balance at debit time | Transient | Hours to days (often clusters near salary cycle) | Yes | Delay retry, bias toward late-month / early-next-month windows |
 | P2 | Any | Issuing bank server / NPCI timeout | Transient (technical) | Minutes to hours | Yes, aggressively | Short-delay retry, 1–2 quick attempts before backing off |
-| P3 | Any | Risk / fraud hold by issuing bank | Ambiguous | Unknown, bank-side | Cautious yes | Single delayed retry only; repeated attempts risk mandate flagging |
+| P3 | Any | Risk / fraud hold by issuing bank | Ambiguous | Unknown, bank-side | Depends — see 2026-08-24 revision note below | Single delayed retry only, and only for the generic-risk-hold sub-case; repeated attempts risk mandate flagging |
 | P4 | Any | Mandate expired | Hard | N/A — same mandate unrecoverable | No | Do not retry; trigger re-authorization fallback |
 | P5 | Any | Mandate revoked / paused by customer | Hard | N/A | No | Do not retry; requires fresh consent |
 | P6 | UPI Autopay | Mandate debit-limit breached (e.g. ₹15,000 cap or configured limit) | Hard for this cycle | Resets next cycle | No (this cycle) | Fallback to split payment or wait for next cycle |
@@ -27,6 +27,13 @@ Every category below needs: a simulated trigger (for the failure simulator), a g
 | P12 | Any | Ambiguous / unclassified decline code | Ambiguous | Unknown | Classifier escalates to LLM | Only path where the LLM classifier is actually invoked |
 
 **Note on P3, P6, P7, P11**: these are the categories worth emphasizing in your writeup — they're where naive "just retry N times on a fixed schedule" systems actively cause harm (bank flagging, wasted NPCI retry budget, customer annoyance), which is exactly the gap this project is closing.
+
+**Revision note, 2026-08-24 (Day 10):** P3's original spec above ("Cautious yes", uniform across the category) was too coarse. Investigation (`docs/eval_audit.md`, Day 9 Part B — read the actual classifier reasoning field for ~24 real disagreements, not just the accuracy number) found that a real classifier consistently and defensibly distinguished two sub-cases within "risk/fraud hold" that this taxonomy had collapsed into one:
+
+- **Explicit fraud flag** (bank/network states "Suspected Fraud" outright, e.g. RC=59-style language) — treated as **not retry-worthy without bank/human-side resolution**. This is standard real-world payments practice, not an overcautious read: an explicit fraud flag typically means the issuer wants the case investigated, not blindly re-presented.
+- **Generic risk-system hold** (bank declines pending review, with a path like "customer may need to confirm the transaction," no fraud language) — remains **retry-worthy**, single cautious delayed retry, consistent with the original spec's intent.
+
+`app/simulator.py`'s three P3 `raw_reason_text` variants now carry per-variant `ground_truth_recoverable` reflecting this split (two `False`, one `True`) instead of a uniform `True`. This is a ground-truth correction, not a classifier or prompt change — the classifier's behavior was the evidence that motivated re-examining the label, and it was left untouched.
 
 ---
 
