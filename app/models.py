@@ -43,6 +43,7 @@ class MandateStatus(str, enum.Enum):
 
 class RetryOutcome(str, enum.Enum):
     pending = "pending"
+    executing = "executing"
     success = "success"
     failed = "failed"
     skipped = "skipped"
@@ -74,6 +75,14 @@ class Mandate(Base):
         default=MandateStatus.created,
     )
     mandate_expiry: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    razorpay_token: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        comment="Set only once a real Razorpay recurring-payment token exists (the "
+        "customer completed the hosted Checkout/registration-link authorization). "
+        "None means this mandate is synthetic-only; the executor uses this to "
+        "decide real API call vs. stub (see app/executor.py, README).",
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
     )

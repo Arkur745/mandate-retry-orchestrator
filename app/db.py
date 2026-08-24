@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     razorpay_key_secret: str = ""
     groq_api_key: str = ""
     groq_model: str = "openai/gpt-oss-20b"
+    time_scale: float = 1.0  # 1.0 = real-time; >1.0 = fast-forward (see app/executor.py Clock)
 
 
 settings = Settings()
