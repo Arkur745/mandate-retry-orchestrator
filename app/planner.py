@@ -32,6 +32,7 @@ from sqlalchemy.orm import Session
 from app.constraints import check_retry
 from app.models import (
     Classification,
+    EscalationReasonCode,
     FailureEvent,
     Mandate,
     PlanDecision,
@@ -289,6 +290,7 @@ def plan_retries(
                 f"(method={classification.method.value}) -- not confidently "
                 "recoverable, no search attempted."
             ),
+            reason_code=EscalationReasonCode.not_recoverable,
             commit=commit,
         )
 
@@ -302,6 +304,7 @@ def plan_retries(
                 f"the {CONFIDENCE_THRESHOLD} retry threshold -- too uncertain to spend "
                 "retry budget on, no search attempted."
             ),
+            reason_code=EscalationReasonCode.low_confidence,
             commit=commit,
         )
 
@@ -316,6 +319,7 @@ def plan_retries(
                 "despite recoverable=True -- escalating defensively rather than "
                 "guessing a search space."
             ),
+            reason_code=EscalationReasonCode.no_timing_profile,
             commit=commit,
         )
 
@@ -338,6 +342,7 @@ def plan_retries(
                 "combinations considered) was vetoed by the constraint store -- "
                 "no valid retry timing exists (e.g. mandate expiring imminently)."
             ),
+            reason_code=EscalationReasonCode.all_candidates_vetoed,
             commit=commit,
         )
 
@@ -369,6 +374,7 @@ def plan_retries(
                 f"has expected value {best.expected_value:.2f} paise <= "
                 f"{EV_ESCALATE_THRESHOLD_PAISE:.2f} -- not worth retrying (S7)."
             ),
+            reason_code=EscalationReasonCode.negative_expected_value,
             commit=commit,
         )
 
@@ -414,6 +420,7 @@ def _escalate(
     classification: Classification,
     *,
     reasoning: str,
+    reason_code: EscalationReasonCode,
     commit: bool,
 ) -> RetryPlan:
     plan = RetryPlan(
@@ -422,6 +429,7 @@ def _escalate(
         decision=PlanDecision.escalate,
         reasoning=reasoning,
         expected_value=None,
+        escalation_reason_code=reason_code,
     )
     db.add(plan)
     if commit:

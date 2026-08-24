@@ -60,6 +60,35 @@ class PlanDecision(str, enum.Enum):
     escalate = "escalate"
 
 
+class EscalationReasonCode(str, enum.Enum):
+    """Structured reason a RetryPlan escalated -- set alongside the
+    free-text reasoning so downstream consumers (app.fallback) don't have
+    to parse prose. None for 'retry' decisions."""
+
+    not_recoverable = "not_recoverable"
+    low_confidence = "low_confidence"
+    no_timing_profile = "no_timing_profile"
+    all_candidates_vetoed = "all_candidates_vetoed"
+    negative_expected_value = "negative_expected_value"
+
+
+class EscalationType(str, enum.Enum):
+    """Which fallback-message template family applies. Computed
+    deterministically in app.fallback from (taxonomy_id,
+    escalation_reason_code, mandate.rail) -- not an LLM decision, see
+    app/fallback.py's module docstring for why."""
+
+    retry_exhausted_nudge = "retry_exhausted_nudge"
+    reauth_needed = "reauth_needed"
+    rail_switch_recommended = "rail_switch_recommended"
+    merchant_escalation = "merchant_escalation"
+
+
+class FallbackMethod(str, enum.Enum):
+    llm = "llm"
+    safe_default = "safe_default"
+
+
 class Mandate(Base):
     __tablename__ = "mandates"
 
@@ -194,6 +223,12 @@ class RetryPlan(Base):
         nullable=True,
         comment="Total expected value in paise for a 'retry' decision; null for 'escalate'",
     )
+    escalation_reason_code: Mapped[EscalationReasonCode | None] = mapped_column(
+        Enum(EscalationReasonCode, name="escalation_reason_code_enum"),
+        nullable=True,
+        comment="Set only for decision='escalate'; app.fallback reads this instead of "
+        "parsing the free-text reasoning",
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
     )
@@ -203,6 +238,9 @@ class RetryPlan(Base):
         back_populates="retry_plan",
         cascade="all, delete-orphan",
         order_by="PlannedAttempt.attempt_number",
+    )
+    fallback_messages: Mapped[list["FallbackMessage"]] = relationship(
+        back_populates="retry_plan", cascade="all, delete-orphan"
     )
 
 
@@ -236,6 +274,35 @@ class PlannedAttempt(Base):
     )
 
     retry_plan: Mapped["RetryPlan"] = relationship(back_populates="steps")
+
+
+class FallbackMessage(Base):
+    __tablename__ = "fallback_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    retry_plan_id: Mapped[int] = mapped_column(
+        ForeignKey("retry_plans.id"), nullable=False, index=True
+    )
+    escalation_type: Mapped[EscalationType] = mapped_column(
+        Enum(EscalationType, name="escalation_type_enum"), nullable=False
+    )
+    template_key: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        comment="Which template was actually rendered -- matches escalation_type unless "
+        "validation failed, in which case it's the safe-default template",
+    )
+    method: Mapped[FallbackMethod] = mapped_column(
+        Enum(FallbackMethod, name="fallback_method_enum"), nullable=False
+    )
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    validation_passed: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    validation_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+
+    retry_plan: Mapped["RetryPlan"] = relationship(back_populates="fallback_messages")
 
 
 class AuditLog(Base):
