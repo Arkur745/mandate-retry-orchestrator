@@ -341,7 +341,23 @@ def plan_retries(
             commit=commit,
         )
 
-    best = max(candidates, key=lambda c: c.expected_value)
+    # Tie-break for candidates with equal expected value (this happens
+    # whenever a profile offers multiple offsets in the same slot, e.g.
+    # fast_technical's (0.5, 1.0) -- probability/cost depend only on step
+    # *position*, not which offset was chosen within a slot, so those
+    # candidates are genuinely EV-tied, not just close). Priority order
+    # after expected value itself:
+    #   1. Fewer attempts. A shorter sequence hitting the same modeled EV
+    #      carries less real-world bank-flagging/rate-limit exposure than
+    #      the EV formula captures, so it's the safer bet when the model
+    #      can't distinguish two options.
+    #   2. Earliest schedule (lexicographically smallest offsets) among
+    #      equal-length ties. Resolving sooner shortens the customer's
+    #      at-risk window and the merchant's revenue-recognition delay,
+    #      at zero EV cost.
+    # tuple ordering gives this for free: (-expected_value, length, offsets)
+    # sorts by EV descending, then length ascending, then offsets ascending.
+    best = min(candidates, key=lambda c: (-c.expected_value, len(c.offsets_hours), c.offsets_hours))
 
     if best.expected_value <= EV_ESCALATE_THRESHOLD_PAISE:
         return _escalate(
